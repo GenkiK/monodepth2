@@ -5,3 +5,8 @@ __pycache__
 *.npz
 kitti_data
 models
+venv/
+*.sif
+*.sbox
+.vscode/
+.python-version

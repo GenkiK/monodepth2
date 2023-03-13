@@ -1,16 +1,17 @@
 # Copyright Niantic 2019. Patent Pending. All rights reserved.
 #
-# This software is licensed under the terms of the Monodepth2 licence
+# This software is licensed under the terms of the Monodepth2 license
 # which allows for non-commercial use only, the full terms of which are made
 # available in the LICENSE file.
 
 from __future__ import absolute_import, division, print_function
 
+from collections import OrderedDict
+
 import numpy as np
 import torch
 import torch.nn as nn
 
-from collections import OrderedDict
 from layers import *
 
 
@@ -20,7 +21,7 @@ class DepthDecoder(nn.Module):
 
         self.num_output_channels = num_output_channels
         self.use_skips = use_skips
-        self.upsample_mode = 'nearest'
+        self.upsample_mode = "nearest"
         self.scales = scales
 
         self.num_ch_enc = num_ch_enc

@@ -1,28 +1,28 @@
 # Copyright Niantic 2019. Patent Pending. All rights reserved.
 #
-# This software is licensed under the terms of the Monodepth2 licence
+# This software is licensed under the terms of the Monodepth2 license
 # which allows for non-commercial use only, the full terms of which are made
 # available in the LICENSE file.
 
 from __future__ import absolute_import, division, print_function
 
+import copy
 import os
 import random
-import numpy as np
-import copy
-from PIL import Image  # using pillow-simd for increased speed
 
+import numpy as np
 import torch
 import torch.utils.data as data
+from PIL import Image  # using pillow-simd for increased speed
 from torchvision import transforms
 
 
 def pil_loader(path):
     # open path as file to avoid ResourceWarning
     # (https://github.com/python-pillow/Pillow/issues/835)
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         with Image.open(f) as img:
-            return img.convert('RGB')
+            return img.convert("RGB")
 
 
 class MonoDataset(data.Dataset):
@@ -38,15 +38,8 @@ class MonoDataset(data.Dataset):
         is_train
         img_ext
     """
-    def __init__(self,
-                 data_path,
-                 filenames,
-                 height,
-                 width,
-                 frame_idxs,
-                 num_scales,
-                 is_train=False,
-                 img_ext='.jpg'):
+
+    def __init__(self, data_path, filenames, height, width, frame_idxs, num_scales, is_train=False, img_ext=".jpg"):
         super(MonoDataset, self).__init__()
 
         self.data_path = data_path
@@ -71,8 +64,7 @@ class MonoDataset(data.Dataset):
             self.contrast = (0.8, 1.2)
             self.saturation = (0.8, 1.2)
             self.hue = (-0.1, 0.1)
-            transforms.ColorJitter.get_params(
-                self.brightness, self.contrast, self.saturation, self.hue)
+            transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
         except TypeError:
             self.brightness = 0.2
             self.contrast = 0.2
@@ -81,9 +73,8 @@ class MonoDataset(data.Dataset):
 
         self.resize = {}
         for i in range(self.num_scales):
-            s = 2 ** i
-            self.resize[i] = transforms.Resize((self.height // s, self.width // s),
-                                               interpolation=self.interp)
+            s = 2**i
+            self.resize[i] = transforms.Resize((self.height // s, self.width // s), interpolation=self.interp)
 
         self.load_depth = self.check_depth()
 
@@ -164,8 +155,8 @@ class MonoDataset(data.Dataset):
         for scale in range(self.num_scales):
             K = self.K.copy()
 
-            K[0, :] *= self.width // (2 ** scale)
-            K[1, :] *= self.height // (2 ** scale)
+            K[0, :] *= self.width // (2**scale)
+            K[1, :] *= self.height // (2**scale)
 
             inv_K = np.linalg.pinv(K)
 
@@ -173,10 +164,9 @@ class MonoDataset(data.Dataset):
             inputs[("inv_K", scale)] = torch.from_numpy(inv_K)
 
         if do_color_aug:
-            color_aug = transforms.ColorJitter.get_params(
-                self.brightness, self.contrast, self.saturation, self.hue)
+            color_aug = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
         else:
-            color_aug = (lambda x: x)
+            color_aug = lambda x: x
 
         self.preprocess(inputs, color_aug)
 
