@@ -7,16 +7,16 @@
 from __future__ import absolute_import, division, print_function
 
 import os
-import numpy as np
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from layers import transformation_from_parameters
-from utils import readlines
-from options import MonodepthOptions
-from datasets import KITTIOdomDataset
 import networks
+from datasets import KITTIOdomDataset
+from layers import transformation_from_parameters
+from options import MonodepthOptions
+from utils import readlines
 
 
 # from https://github.com/tinghuiz/SfMLearner
@@ -81,14 +81,14 @@ def evaluate(opt):
 
     print("-> Computing pose predictions")
 
-    opt.frame_ids = [0, 1]  # pose network only takes two frames as input
+    opt.adj_frame_idxs = [0, 1]  # pose network only takes two frames as input
 
     with torch.no_grad():
         for inputs in dataloader:
             for key, ipt in inputs.items():
                 inputs[key] = ipt.cuda()
 
-            all_color_aug = torch.cat([inputs[("color_aug", i, 0)] for i in opt.frame_ids], 1)
+            all_color_aug = torch.cat([inputs[("color_aug", i, 0)] for i in opt.adj_frame_idxs], 1)
 
             features = [pose_encoder(all_color_aug)]
             axisangle, translation = pose_decoder(features)

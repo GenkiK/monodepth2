@@ -38,15 +38,15 @@ class Trainer:
         self.device = torch.device("cpu" if self.opt.no_cuda else "cuda")
 
         self.num_scales = len(self.opt.scales)
-        self.num_input_frames = len(self.opt.frame_ids)
+        self.num_input_frames = len(self.opt.adj_frame_idxs)
         self.num_pose_frames = 2 if self.opt.pose_model_input == "pairs" else self.num_input_frames
 
-        assert self.opt.frame_ids[0] == 0, "frame_ids must start with 0"
+        assert self.opt.adj_frame_idxs[0] == 0, "adj_frame_idxs must start with 0"
 
-        self.use_pose_net = not (self.opt.use_stereo and self.opt.frame_ids == [0])
+        self.use_pose_net = not (self.opt.use_stereo and self.opt.adj_frame_idxs == [0])
 
         if self.opt.use_stereo:
-            self.opt.frame_ids.append("s")
+            self.opt.adj_frame_idxs.append("s")
 
         self.models["encoder"] = networks.ResnetEncoder(self.opt.num_layers, self.opt.weights_init == "pretrained")
         self.models["encoder"].to(self.device)
@@ -88,7 +88,9 @@ class Trainer:
             # Our implementation of the predictive masking baseline has the the same architecture
             # as our depth decoder. We predict a separate mask for each source frame.
             self.models["predictive_mask"] = networks.DepthDecoder(
-                self.models["encoder"].num_ch_enc, self.opt.scales, num_output_channels=(len(self.opt.frame_ids) - 1)
+                self.models["encoder"].num_ch_enc,
+                self.opt.scales,
+                num_output_channels=(len(self.opt.adj_frame_idxs) - 1),
             )
             self.models["predictive_mask"].to(self.device)
             self.parameters_to_train += list(self.models["predictive_mask"].parameters())
@@ -121,7 +123,7 @@ class Trainer:
             train_filenames,
             self.opt.height,
             self.opt.width,
-            self.opt.frame_ids,
+            self.opt.adj_frame_idxs,
             4,
             is_train=True,
             img_ext=img_ext,
@@ -134,7 +136,7 @@ class Trainer:
             val_filenames,
             self.opt.height,
             self.opt.width,
-            self.opt.frame_ids,
+            self.opt.adj_frame_idxs,
             4,
             is_train=False,
             img_ext=img_ext,
@@ -233,12 +235,12 @@ class Trainer:
         if self.opt.pose_model_type == "shared":
             # If we are using a shared encoder for both depth and pose (as advocated
             # in monodepthv1), then all images are fed separately through the depth encoder.
-            all_color_aug = torch.cat([inputs[("color_aug", i, 0)] for i in self.opt.frame_ids])
+            all_color_aug = torch.cat([inputs[("color_aug", i, 0)] for i in self.opt.adj_frame_idxs])
             all_features = self.models["encoder"](all_color_aug)
             all_features = [torch.split(f, self.opt.batch_size) for f in all_features]
 
             features = {}
-            for i, k in enumerate(self.opt.frame_ids):
+            for i, k in enumerate(self.opt.adj_frame_idxs):
                 features[k] = [f[i] for f in all_features]
 
             outputs = self.models["depth"](features[0])
@@ -267,11 +269,11 @@ class Trainer:
 
             # select what features the pose network takes as input
             if self.opt.pose_model_type == "shared":
-                pose_feats = {f_i: features[f_i] for f_i in self.opt.frame_ids}
+                pose_feats = {f_i: features[f_i] for f_i in self.opt.adj_frame_idxs}
             else:
-                pose_feats = {f_i: inputs["color_aug", f_i, 0] for f_i in self.opt.frame_ids}
+                pose_feats = {f_i: inputs["color_aug", f_i, 0] for f_i in self.opt.adj_frame_idxs}
 
-            for f_i in self.opt.frame_ids[1:]:
+            for f_i in self.opt.adj_frame_idxs[1:]:
                 if f_i != "s":
                     # To maintain ordering we always pass frames in temporal order
                     if f_i < 0:
@@ -296,17 +298,17 @@ class Trainer:
         else:
             # Here we input all frames to the pose net (and predict all poses) together
             if self.opt.pose_model_type in ["separate_resnet", "posecnn"]:
-                pose_inputs = torch.cat([inputs[("color_aug", i, 0)] for i in self.opt.frame_ids if i != "s"], 1)
+                pose_inputs = torch.cat([inputs[("color_aug", i, 0)] for i in self.opt.adj_frame_idxs if i != "s"], 1)
 
                 if self.opt.pose_model_type == "separate_resnet":
                     pose_inputs = [self.models["pose_encoder"](pose_inputs)]
 
             elif self.opt.pose_model_type == "shared":
-                pose_inputs = [features[i] for i in self.opt.frame_ids if i != "s"]
+                pose_inputs = [features[i] for i in self.opt.adj_frame_idxs if i != "s"]
 
             axisangle, translation = self.models["pose"](pose_inputs)
 
-            for i, f_i in enumerate(self.opt.frame_ids[1:]):
+            for i, f_i in enumerate(self.opt.adj_frame_idxs[1:]):
                 if f_i != "s":
                     outputs[("axisangle", 0, f_i)] = axisangle
                     outputs[("translation", 0, f_i)] = translation
@@ -350,7 +352,7 @@ class Trainer:
 
             outputs[("depth", 0, scale)] = depth
 
-            for i, frame_id in enumerate(self.opt.frame_ids[1:]):
+            for i, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
 
                 if frame_id == "s":
                     T = inputs["stereo_T"]
@@ -415,7 +417,7 @@ class Trainer:
             color = inputs[("color", 0, scale)]
             target = inputs[("color", 0, source_scale)]
 
-            for frame_id in self.opt.frame_ids[1:]:
+            for frame_id in self.opt.adj_frame_idxs[1:]:
                 pred = outputs[("color", frame_id, scale)]
                 reprojection_losses.append(self.compute_reprojection_loss(pred, target))
 
@@ -423,7 +425,7 @@ class Trainer:
 
             if not self.opt.disable_automasking:
                 identity_reprojection_losses = []
-                for frame_id in self.opt.frame_ids[1:]:
+                for frame_id in self.opt.adj_frame_idxs[1:]:
                     pred = inputs[("color", frame_id, source_scale)]
                     identity_reprojection_losses.append(self.compute_reprojection_loss(pred, target))
 
@@ -542,7 +544,7 @@ class Trainer:
 
         for j in range(min(4, self.opt.batch_size)):  # write a maximum of four images
             for s in self.opt.scales:
-                for frame_id in self.opt.frame_ids:
+                for frame_id in self.opt.adj_frame_idxs:
                     writer.add_image(
                         "color_{}_{}/{}".format(frame_id, s, j), inputs[("color", frame_id, s)][j].data, self.step
                     )
@@ -556,7 +558,7 @@ class Trainer:
                 writer.add_image("disp_{}/{}".format(s, j), normalize_image(outputs[("disp", s)][j]), self.step)
 
                 if self.opt.predictive_mask:
-                    for f_idx, frame_id in enumerate(self.opt.frame_ids[1:]):
+                    for f_idx, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
                         writer.add_image(
                             "predictive_mask_{}_{}/{}".format(frame_id, s, j),
                             outputs["predictive_mask"][("disp", s)][j, f_idx][None, ...],

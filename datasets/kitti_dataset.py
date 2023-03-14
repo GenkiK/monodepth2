@@ -21,7 +21,7 @@ class KITTIDataset(MonoDataset):
     """Superclass for different types of KITTI dataset loaders"""
 
     def __init__(self, *args, **kwargs):
-        super(KITTIDataset, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         # NOTE: Make sure your intrinsics matrix is *normalized* by the original image size.
         # To normalize you need to scale the first row by 1 / image_width and the second row
@@ -57,7 +57,7 @@ class KITTIRAWDataset(KITTIDataset):
     """KITTI dataset which loads the original velodyne depth maps for ground truth"""
 
     def __init__(self, *args, **kwargs):
-        super(KITTIRAWDataset, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def get_image_path(self, folder, frame_index, side):
         f_str = "{:010d}{}".format(frame_index, self.img_ext)
@@ -86,7 +86,7 @@ class KITTIOdomDataset(KITTIDataset):
     """KITTI dataset for odometry training and testing"""
 
     def __init__(self, *args, **kwargs):
-        super(KITTIOdomDataset, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def get_image_path(self, folder, frame_index, side):
         f_str = "{:06d}{}".format(frame_index, self.img_ext)
@@ -100,7 +100,7 @@ class KITTIDepthDataset(KITTIDataset):
     """KITTI dataset which uses the updated ground truth depth maps"""
 
     def __init__(self, *args, **kwargs):
-        super(KITTIDepthDataset, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def get_image_path(self, folder, frame_index, side):
         f_str = "{:010d}{}".format(frame_index, self.img_ext)

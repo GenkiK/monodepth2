@@ -15,7 +15,7 @@ In particular please note that:
 
 1. You should know the intrinsics for your custom dataset, and you should set them *normalized* in your dataloader. More details are in the [dataloader comments](https://github.com/nianticlabs/monodepth2/blob/master/datasets/kitti_dataset.py#L24).
 
-2. KITTI is captured at 10 frames per second, and this seems to work well for training in our repo. Most videos are higher frame rate than this, so you may want to consider temporally downsampling your dataset (or setting `--frame_ids` appropriately)
+2. KITTI is captured at 10 frames per second, and this seems to work well for training in our repo. Most videos are higher frame rate than this, so you may want to consider temporally downsampling your dataset (or setting `--adj_frame_idxs` appropriately)
 
 3. If you have moving objects in your training you are likely to still see ‘holes’ punched in your predicted depths, even with automasking turned on (https://github.com/nianticlabs/monodepth2/issues/310) 
 

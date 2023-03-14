@@ -134,13 +134,13 @@ python train.py --model_name mono_model
 Our code defaults to using Zhou's subsampled Eigen training data. For stereo-only training we have to specify that we want to use the full Eigen training set – see paper for details.
 ```shell
 python train.py --model_name stereo_model \
-  --frame_ids 0 --use_stereo --split eigen_full
+  --adj_frame_idxs 0 --use_stereo --split eigen_full
 ```
 
 **Monocular + stereo training:**
 ```shell
 python train.py --model_name mono+stereo_model \
-  --frame_ids 0 -1 1 --use_stereo
+  --adj_frame_idxs 0 -1 1 --use_stereo
 ```
 
 
