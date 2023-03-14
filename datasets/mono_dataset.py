@@ -134,9 +134,9 @@ class MonoDataset(data.Dataset):
         folder = line[0]
 
         if len(line) == 3:
-            frame_index = int(line[1])
+            frame_idx = int(line[1])
         else:
-            frame_index = 0
+            frame_idx = 0
 
         if len(line) == 3:
             side = line[2]
@@ -146,9 +146,9 @@ class MonoDataset(data.Dataset):
         for i in self.frame_idxs:
             if i == "s":
                 other_side = {"r": "l", "l": "r"}[side]
-                inputs[("color", i, -1)] = self.get_color(folder, frame_index, other_side, do_flip)
+                inputs[("color", i, -1)] = self.get_color(folder, frame_idx, other_side, do_flip)
             else:
-                inputs[("color", i, -1)] = self.get_color(folder, frame_index + i, side, do_flip)
+                inputs[("color", i, -1)] = self.get_color(folder, frame_idx + i, side, do_flip)
 
         # adjusting intrinsics to match each scale in the pyramid
         for scale in range(self.num_scales):
@@ -174,7 +174,7 @@ class MonoDataset(data.Dataset):
             del inputs[("color_aug", i, -1)]
 
         if self.load_depth:
-            depth_gt = self.get_depth(folder, frame_index, side, do_flip)
+            depth_gt = self.get_depth(folder, frame_idx, side, do_flip)
             inputs["depth_gt"] = np.expand_dims(depth_gt, 0)
             inputs["depth_gt"] = torch.from_numpy(inputs["depth_gt"].astype(np.float32))
 
@@ -188,11 +188,11 @@ class MonoDataset(data.Dataset):
 
         return inputs
 
-    def get_color(self, folder, frame_index, side, do_flip):
+    def get_color(self, folder, frame_idx, side, do_flip):
         raise NotImplementedError
 
     def check_depth(self):
         raise NotImplementedError
 
-    def get_depth(self, folder, frame_index, side, do_flip):
+    def get_depth(self, folder, frame_idx, side, do_flip):
         raise NotImplementedError

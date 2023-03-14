@@ -25,7 +25,7 @@ def pil_loader(path):
             return img.convert("RGB")
 
 
-class MonoDataset(data.Dataset):
+class MonoDatasetWithSegm(data.Dataset):
     """Superclass for monocular dataloaders
 
     Args:
@@ -188,11 +188,11 @@ class MonoDataset(data.Dataset):
 
         return input_dict
 
-    def get_color(self, folder, frame_index, side, do_flip):
+    def get_color(self, folder, frame_idx, side, do_flip):
         raise NotImplementedError
 
     def check_depth(self):
         raise NotImplementedError
 
-    def get_depth(self, folder, frame_index, side, do_flip):
+    def get_depth(self, folder, frame_idx, side, do_flip):
         raise NotImplementedError
