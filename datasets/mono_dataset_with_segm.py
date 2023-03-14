@@ -17,12 +17,19 @@ from PIL import Image  # using pillow-simd for increased speed
 from torchvision import transforms
 
 
-def pil_loader(path):
+def load_pil(path):
     # open path as file to avoid ResourceWarning
     # (https://github.com/python-pillow/Pillow/issues/835)
     with open(path, "rb") as f:
         with Image.open(f) as img:
             return img.convert("RGB")
+
+
+def load_segm_and_category_as_tensor(path: str) -> tuple[np.ndarray, np.ndarray]:
+    npz = np.load(path)
+    segms = torch.from_numpy(npz["segm"].astype(np.float32))
+    categories = torch.from_numpy(npz["category"].astype(np.int8))
+    return segms, categories
 
 
 class MonoDatasetWithSegm(data.Dataset):
@@ -37,9 +44,21 @@ class MonoDatasetWithSegm(data.Dataset):
         num_scales
         is_train
         img_ext
+        segm_ext
     """
 
-    def __init__(self, data_path, filenames, height, width, adj_frame_idxs, num_scales, is_train=False, img_ext=".jpg"):
+    def __init__(
+        self,
+        data_path,
+        filenames,
+        height,
+        width,
+        adj_frame_idxs,
+        num_scales,
+        is_train=False,
+        img_ext=".jpg",
+        segm_ext=".npz",
+    ):
         super().__init__()
 
         self.data_path = data_path  # ~/workspace/monodepth2/kitti_data
@@ -47,14 +66,16 @@ class MonoDatasetWithSegm(data.Dataset):
         self.height = height
         self.width = width
         self.num_scales = num_scales
-        self.interp = Image.ANTIALIAS
+        # self.interp = Image.ANTIALIAS
 
         self.adj_frame_idxs = adj_frame_idxs  # default: [0, -1, 1]
 
         self.is_train = is_train
         self.img_ext = img_ext
+        self.segm_ext = segm_ext
 
-        self.loader = pil_loader
+        self.pil_loader = load_pil
+        self.tensor_segm_loader = load_segm_and_category_as_tensor
         self.to_tensor = transforms.ToTensor()
 
         # We need to specify augmentations differently in newer versions of torchvision.
@@ -71,11 +92,16 @@ class MonoDatasetWithSegm(data.Dataset):
             self.saturation = 0.2
             self.hue = 0.1
 
+        img_interp = transforms.InterpolationMode.LANCZOS
+        segm_interp = transforms.InterpolationMode.NEAREST
         self.resize_func_dict = {}
+        self.segm_resize_func_dict = {}
         for i in range(self.num_scales):
             s = 2**i
-            self.resize_func_dict[i] = transforms.Resize((self.height // s, self.width // s), interpolation=self.interp)
-
+            self.resize_func_dict[i] = transforms.Resize((self.height // s, self.width // s), interpolation=img_interp)
+            self.segm_resize_func_dict[i] = transforms.Resize(
+                (self.height // s, self.width // s), interpolation=segm_interp
+            )
         self.load_depth = self.check_depth()
 
     def preprocess(self, input_dict, color_aug):
@@ -86,14 +112,18 @@ class MonoDatasetWithSegm(data.Dataset):
         same augmentation.
         """
         for key in input_dict.keys():
-            if "color" in key:
+            if key[0] == "color":
                 name, f_idx, _ = key
                 for i in range(self.num_scales):
                     input_dict[(name, f_idx, i)] = self.resize_func_dict[i](input_dict[(name, f_idx, i - 1)])
+            elif key[0] == "segm":
+                name, f_idx, _ = key
+                for i in range(self.num_scales):
+                    input_dict[(name, f_idx, i)] = self.segm_resize_func_dict[i](input_dict[(name, f_idx, i - 1)])
 
         for key in input_dict.keys():
             f = input_dict[key]
-            if "color" in key:
+            if key[0] == "color":
                 name, f_idx, i = key
                 input_dict[(name, f_idx, i)] = self.to_tensor(f)
                 input_dict[(name + "_aug", f_idx, i)] = self.to_tensor(color_aug(f))
@@ -147,8 +177,16 @@ class MonoDatasetWithSegm(data.Dataset):
             if i == "s":
                 other_side = {"r": "l", "l": "r"}[side]
                 input_dict[("color", i, -1)] = self.get_color(scene_name, frame_idx, other_side, do_flip)
+                input_dict[("segm", i, -1)] = self.get_segm(scene_name, frame_idx, other_side, do_flip)
             else:
                 input_dict[("color", i, -1)] = self.get_color(scene_name, frame_idx + i, side, do_flip)
+                input_dict[("segm", i, -1)] = self.get_segm(scene_name, frame_idx + i, side, do_flip)
+
+        if do_color_aug:
+            color_aug = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
+        else:
+            color_aug = lambda x: x
+        self.preprocess(input_dict, color_aug)
 
         # adjusting intrinsics to match each scale in the pyramid
         for scale in range(self.num_scales):
@@ -162,16 +200,10 @@ class MonoDatasetWithSegm(data.Dataset):
             input_dict[("K", scale)] = torch.from_numpy(K)
             input_dict[("inv_K", scale)] = torch.from_numpy(inv_K)
 
-        if do_color_aug:
-            color_aug = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
-        else:
-            color_aug = lambda x: x
-
-        self.preprocess(input_dict, color_aug)
-
         for i in self.adj_frame_idxs:
             del input_dict[("color", i, -1)]
             del input_dict[("color_aug", i, -1)]
+            del input_dict[("segm", i, -1)]
 
         if self.load_depth:
             depth_gt = self.get_depth(scene_name, frame_idx, side, do_flip)
@@ -187,6 +219,9 @@ class MonoDatasetWithSegm(data.Dataset):
             input_dict["stereo_T"] = torch.from_numpy(stereo_T)
 
         return input_dict
+
+    def get_segm(self, folder, frame_idx, side, do_flip):
+        raise NotImplementedError
 
     def get_color(self, folder, frame_idx, side, do_flip):
         raise NotImplementedError

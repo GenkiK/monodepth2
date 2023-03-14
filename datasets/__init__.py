@@ -1,1 +1,2 @@
-from .kitti_dataset import KITTIRAWDataset, KITTIOdomDataset, KITTIDepthDataset
+from .kitti_dataset import KITTIDepthDataset, KITTIOdomDataset, KITTIRAWDataset
+from .kitti_dataset_with_segm import KITTIRAWDatasetWithSegm
