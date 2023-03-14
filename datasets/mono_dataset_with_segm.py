@@ -71,10 +71,10 @@ class MonoDataset(data.Dataset):
             self.saturation = 0.2
             self.hue = 0.1
 
-        self.resize = {}
+        self.resize_func_dict = {}
         for i in range(self.num_scales):
             s = 2**i
-            self.resize[i] = transforms.Resize((self.height // s, self.width // s), interpolation=self.interp)
+            self.resize_func_dict[i] = transforms.Resize((self.height // s, self.width // s), interpolation=self.interp)
 
         self.load_depth = self.check_depth()
 
@@ -85,18 +85,18 @@ class MonoDataset(data.Dataset):
         images in this item. This ensures that all images input to the pose network receive the
         same augmentation.
         """
-        for k in input_dict.keys():
-            if "color" in k:
-                n, im, i = k
+        for key in input_dict.keys():
+            if "color" in key:
+                name, f_idx, _ = key
                 for i in range(self.num_scales):
-                    input_dict[(n, im, i)] = self.resize[i](input_dict[(n, im, i - 1)])
+                    input_dict[(name, f_idx, i)] = self.resize_func_dict[i](input_dict[(name, f_idx, i - 1)])
 
-        for k in input_dict.keys():
-            f = input_dict[k]
-            if "color" in k:
-                n, im, i = k
-                input_dict[(n, im, i)] = self.to_tensor(f)
-                input_dict[(n + "_aug", im, i)] = self.to_tensor(color_aug(f))
+        for key in input_dict.keys():
+            f = input_dict[key]
+            if "color" in key:
+                name, f_idx, i = key
+                input_dict[(name, f_idx, i)] = self.to_tensor(f)
+                input_dict[(name + "_aug", f_idx, i)] = self.to_tensor(color_aug(f))
 
     def __len__(self):
         return len(self.filenames)
@@ -107,13 +107,13 @@ class MonoDataset(data.Dataset):
         Values correspond to torch tensors.
         Keys in the dictionary are either strings or tuples:
 
-            ("color", <frame_id>, <scale>)          for raw colour images,
-            ("color_aug", <frame_id>, <scale>)      for augmented colour images,
-            ("K", scale) or ("inv_K", scale)        for camera intrinsics,
-            "stereo_T"                              for camera extrinsics, and
-            "depth_gt"                              for ground truth depth maps.
+            ("color", <adj_frame_idx>, <scale>)          for raw colour images,
+            ("color_aug", <adj_frame_idx>, <scale>)      for augmented colour images,
+            ("K", scale) or ("inv_K", scale)             for camera intrinsics,
+            "stereo_T"                                   for camera extrinsics, and
+            "depth_gt"                                   for ground truth depth maps.
 
-        <frame_id> is either:
+        <adj_frame_id> is either:
             an integer (e.g. 0, -1, or 1) representing the temporal step relative to 'index',
         or
             "s" for the opposite image in the stereo pair.

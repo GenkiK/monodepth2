@@ -86,7 +86,6 @@ class MonoDataset(data.Dataset):
         same augmentation.
         """
         for k in list(inputs):
-            frame = inputs[k]
             if "color" in k:
                 n, im, i = k
                 for i in range(self.num_scales):

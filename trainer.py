@@ -124,7 +124,7 @@ class Trainer:
             self.opt.height,
             self.opt.width,
             self.opt.adj_frame_idxs,
-            4,
+            self.num_scales,
             is_train=True,
             img_ext=img_ext,
         )
@@ -137,7 +137,7 @@ class Trainer:
             self.opt.height,
             self.opt.width,
             self.opt.adj_frame_idxs,
-            4,
+            self.num_scales,
             is_train=False,
             img_ext=img_ext,
         )
@@ -200,11 +200,12 @@ class Trainer:
         print("Training")
         self.set_train()
 
-        for batch_idx, inputs in enumerate(self.train_loader):
+        for batch_idx, batch_input_dict in enumerate(self.train_loader):
+            # TODO: batch_input_dictの型を見る（process_batch()の中を見るとdictっぽい）
 
             before_op_time = time.time()
 
-            outputs, losses = self.process_batch(inputs)
+            outputs, losses = self.process_batch(batch_input_dict)
 
             self.model_optimizer.zero_grad()
             losses["loss"].backward()
@@ -219,48 +220,44 @@ class Trainer:
             if early_phase or late_phase:
                 self.log_time(batch_idx, duration, losses["loss"].cpu().data)
 
-                if "depth_gt" in inputs:
-                    self.compute_depth_losses(inputs, outputs, losses)
+                if "depth_gt" in batch_input_dict:
+                    self.compute_depth_losses(batch_input_dict, outputs, losses)
 
-                self.log("train", inputs, outputs, losses)
+                self.log("train", batch_input_dict, outputs, losses)
                 self.val()
 
             self.step += 1
 
-    def process_batch(self, inputs):
+    def process_batch(self, input_dict):
         """Pass a minibatch through the network and generate images and losses"""
-        for key, ipt in inputs.items():
-            inputs[key] = ipt.to(self.device)
+        input_dict = {key: ipt.to(self.device) for key, ipt in input_dict.items()}
 
         if self.opt.pose_model_type == "shared":
             # If we are using a shared encoder for both depth and pose (as advocated
             # in monodepthv1), then all images are fed separately through the depth encoder.
-            all_color_aug = torch.cat([inputs[("color_aug", i, 0)] for i in self.opt.adj_frame_idxs])
+            all_color_aug = torch.cat([input_dict[("color_aug", i, 0)] for i in self.opt.adj_frame_idxs])
             all_features = self.models["encoder"](all_color_aug)
             all_features = [torch.split(f, self.opt.batch_size) for f in all_features]
 
-            features = {}
-            for i, k in enumerate(self.opt.adj_frame_idxs):
-                features[k] = [f[i] for f in all_features]
-
+            features = {key: [f[i] for f in all_features] for i, key in enumerate(self.opt.adj_frame_idxs)}
             outputs = self.models["depth"](features[0])
         else:
             # Otherwise, we only feed the image with frame_id 0 through the depth encoder
-            features = self.models["encoder"](inputs["color_aug", 0, 0])
+            features = self.models["encoder"](input_dict["color_aug", 0, 0])
             outputs = self.models["depth"](features)
 
         if self.opt.predictive_mask:
             outputs["predictive_mask"] = self.models["predictive_mask"](features)
 
         if self.use_pose_net:
-            outputs.update(self.predict_poses(inputs, features))
+            outputs.update(self.predict_poses(input_dict, features))
 
-        self.generate_images_pred(inputs, outputs)
-        losses = self.compute_losses(inputs, outputs)
+        self.generate_images_pred(input_dict, outputs)
+        losses = self.compute_losses(input_dict, outputs)
 
         return outputs, losses
 
-    def predict_poses(self, inputs, features):
+    def predict_poses(self, input_dict, features):
         """Predict poses between input frames for monocular sequences."""
         outputs = {}
         if self.num_pose_frames == 2:
@@ -271,7 +268,7 @@ class Trainer:
             if self.opt.pose_model_type == "shared":
                 pose_feats = {f_i: features[f_i] for f_i in self.opt.adj_frame_idxs}
             else:
-                pose_feats = {f_i: inputs["color_aug", f_i, 0] for f_i in self.opt.adj_frame_idxs}
+                pose_feats = {f_i: input_dict["color_aug", f_i, 0] for f_i in self.opt.adj_frame_idxs}
 
             for f_i in self.opt.adj_frame_idxs[1:]:
                 if f_i != "s":
@@ -298,7 +295,9 @@ class Trainer:
         else:
             # Here we input all frames to the pose net (and predict all poses) together
             if self.opt.pose_model_type in ["separate_resnet", "posecnn"]:
-                pose_inputs = torch.cat([inputs[("color_aug", i, 0)] for i in self.opt.adj_frame_idxs if i != "s"], 1)
+                pose_inputs = torch.cat(
+                    [input_dict[("color_aug", i, 0)] for i in self.opt.adj_frame_idxs if i != "s"], 1
+                )
 
                 if self.opt.pose_model_type == "separate_resnet":
                     pose_inputs = [self.models["pose_encoder"](pose_inputs)]
@@ -320,23 +319,23 @@ class Trainer:
         """Validate the model on a single minibatch"""
         self.set_eval()
         try:
-            inputs = self.val_iter.next()
+            input_dict = self.val_iter.next()
         except StopIteration:
             self.val_iter = iter(self.val_loader)
-            inputs = self.val_iter.next()
+            input_dict = self.val_iter.next()
 
         with torch.no_grad():
-            outputs, losses = self.process_batch(inputs)
+            outputs, losses = self.process_batch(input_dict)
 
-            if "depth_gt" in inputs:
-                self.compute_depth_losses(inputs, outputs, losses)
+            if "depth_gt" in input_dict:
+                self.compute_depth_losses(input_dict, outputs, losses)
 
-            self.log("val", inputs, outputs, losses)
-            del inputs, outputs, losses
+            self.log("val", input_dict, outputs, losses)
+            del input_dict, outputs, losses
 
         self.set_train()
 
-    def generate_images_pred(self, inputs, outputs):
+    def generate_images_pred(self, input_dict, outputs):
         """Generate the warped (reprojected) color images for a minibatch.
         Generated images are saved into the `outputs` dictionary.
         """
@@ -355,7 +354,7 @@ class Trainer:
             for i, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
 
                 if frame_id == "s":
-                    T = inputs["stereo_T"]
+                    T = input_dict["stereo_T"]
                 else:
                     T = outputs[("cam_T_cam", 0, frame_id)]
 
@@ -372,19 +371,19 @@ class Trainer:
                         axisangle[:, 0], translation[:, 0] * mean_inv_depth[:, 0], frame_id < 0
                     )
 
-                cam_points = self.backproject_depth[source_scale](depth, inputs[("inv_K", source_scale)])
-                pix_coords = self.project_3d[source_scale](cam_points, inputs[("K", source_scale)], T)
+                cam_points = self.backproject_depth[source_scale](depth, input_dict[("inv_K", source_scale)])
+                pix_coords = self.project_3d[source_scale](cam_points, input_dict[("K", source_scale)], T)
 
                 outputs[("sample", frame_id, scale)] = pix_coords
 
                 outputs[("color", frame_id, scale)] = F.grid_sample(
-                    inputs[("color", frame_id, source_scale)],
+                    input_dict[("color", frame_id, source_scale)],
                     outputs[("sample", frame_id, scale)],
                     padding_mode="border",
                 )
 
                 if not self.opt.disable_automasking:
-                    outputs[("color_identity", frame_id, scale)] = inputs[("color", frame_id, source_scale)]
+                    outputs[("color_identity", frame_id, scale)] = input_dict[("color", frame_id, source_scale)]
 
     def compute_reprojection_loss(self, pred, target):
         """Computes reprojection loss between a batch of predicted and target images"""
@@ -399,7 +398,7 @@ class Trainer:
 
         return reprojection_loss
 
-    def compute_losses(self, inputs, outputs):
+    def compute_losses(self, input_dict, outputs):
         """Compute the reprojection and smoothness losses for a minibatch"""
         losses = {}
         total_loss = 0
@@ -414,8 +413,8 @@ class Trainer:
                 source_scale = 0
 
             disp = outputs[("disp", scale)]
-            color = inputs[("color", 0, scale)]
-            target = inputs[("color", 0, source_scale)]
+            color = input_dict[("color", 0, scale)]
+            target = input_dict[("color", 0, source_scale)]
 
             for frame_id in self.opt.adj_frame_idxs[1:]:
                 pred = outputs[("color", frame_id, scale)]
@@ -426,7 +425,7 @@ class Trainer:
             if not self.opt.disable_automasking:
                 identity_reprojection_losses = []
                 for frame_id in self.opt.adj_frame_idxs[1:]:
-                    pred = inputs[("color", frame_id, source_scale)]
+                    pred = input_dict[("color", frame_id, source_scale)]
                     identity_reprojection_losses.append(self.compute_reprojection_loss(pred, target))
 
                 identity_reprojection_losses = torch.cat(identity_reprojection_losses, 1)
@@ -488,7 +487,7 @@ class Trainer:
         losses["loss"] = total_loss
         return losses
 
-    def compute_depth_losses(self, inputs, outputs, losses):
+    def compute_depth_losses(self, input_dict, outputs, losses):
         """Compute depth metrics, to allow monitoring during training
 
         This isn't particularly accurate as it averages over the entire batch,
@@ -498,7 +497,7 @@ class Trainer:
         depth_pred = torch.clamp(F.interpolate(depth_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
         depth_pred = depth_pred.detach()
 
-        depth_gt = inputs["depth_gt"]
+        depth_gt = input_dict["depth_gt"]
         mask = depth_gt > 0
 
         # garg/eigen crop
@@ -536,7 +535,7 @@ class Trainer:
             )
         )
 
-    def log(self, mode, inputs, outputs, losses):
+    def log(self, mode, input_dict, outputs, losses):
         """Write an event to the tensorboard events file"""
         writer = self.writers[mode]
         for l, v in losses.items():
@@ -546,7 +545,7 @@ class Trainer:
             for s in self.opt.scales:
                 for frame_id in self.opt.adj_frame_idxs:
                     writer.add_image(
-                        "color_{}_{}/{}".format(frame_id, s, j), inputs[("color", frame_id, s)][j].data, self.step
+                        "color_{}_{}/{}".format(frame_id, s, j), input_dict[("color", frame_id, s)][j].data, self.step
                     )
                     if s == 0 and frame_id != 0:
                         writer.add_image(
