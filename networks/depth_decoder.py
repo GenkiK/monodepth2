@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from layers import *
+from layers import Conv3x3, ConvBlock, upsample
 
 
 class DepthDecoder(nn.Module):
@@ -49,7 +49,7 @@ class DepthDecoder(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, input_features):
-        self.outputs = {}
+        self.output_dict = {}
 
         # decoder
         x = input_features[-1]
@@ -61,6 +61,6 @@ class DepthDecoder(nn.Module):
             x = torch.cat(x, 1)
             x = self.convs[("upconv", i, 1)](x)
             if i in self.scales:
-                self.outputs[("disp", i)] = self.sigmoid(self.convs[("dispconv", i)](x))
+                self.output_dict[("disp", i)] = self.sigmoid(self.convs[("dispconv", i)](x))
 
-        return self.outputs
+        return self.output_dict

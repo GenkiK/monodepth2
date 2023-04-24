@@ -11,6 +11,15 @@ import os
 import urllib
 import zipfile
 
+import torch
+
+
+def masks_to_pix_heights(masks: torch.Tensor) -> torch.Tensor:
+    mask_idxs = torch.where(masks != 0)
+    return torch.tensor(
+        [mask_idxs[1][mask_idxs[0] == m_idx].max() - mask_idxs[1][mask_idxs[0] == m_idx].min() for m_idx in range(masks.shape[0])]
+    ).to(masks.device)
+
 
 def readlines(filename):
     """Read all the lines in a text file and return as a list"""
@@ -103,7 +112,6 @@ def download_model_if_doesnt_exist(model_name):
 
     # see if we have the model already downloaded...
     if not os.path.exists(os.path.join(model_path, "encoder.pth")):
-
         model_url, required_md5checksum = download_paths[model_name]
 
         if not check_file_matches_md5(required_md5checksum, model_path + ".zip"):

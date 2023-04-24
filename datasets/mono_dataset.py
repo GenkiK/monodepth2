@@ -6,15 +6,15 @@
 
 from __future__ import absolute_import, division, print_function
 
-import copy
-import os
 import random
+from functools import partial
 
 import numpy as np
 import torch
 import torch.utils.data as data
 from PIL import Image  # using pillow-simd for increased speed
 from torchvision import transforms
+from torchvision.transforms import functional as F
 
 
 def pil_loader(path):
@@ -23,6 +23,21 @@ def pil_loader(path):
     with open(path, "rb") as f:
         with Image.open(f) as img:
             return img.convert("RGB")
+
+
+def color_aug_func(img, aug_params):
+    for fn_idx in aug_params[0]:
+        factor = aug_params[fn_idx + 1]
+        match fn_idx:
+            case 0:
+                img = F.adjust_brightness(img, factor)
+            case 1:
+                img = F.adjust_contrast(img, factor)
+            case 2:
+                img = F.adjust_saturation(img, factor)
+            case 3:
+                img = F.adjust_hue(img, factor)
+    return img
 
 
 class MonoDataset(data.Dataset):
@@ -47,7 +62,6 @@ class MonoDataset(data.Dataset):
         self.height = height
         self.width = width
         self.num_scales = num_scales
-        self.interp = Image.ANTIALIAS
 
         self.frame_idxs = frame_idxs
 
@@ -74,7 +88,7 @@ class MonoDataset(data.Dataset):
         self.resize = {}
         for i in range(self.num_scales):
             s = 2**i
-            self.resize[i] = transforms.Resize((self.height // s, self.width // s), interpolation=self.interp)
+            self.resize[i] = transforms.Resize((self.height // s, self.width // s), interpolation=transforms.InterpolationMode.LANCZOS)
 
         self.load_depth = self.check_depth()
 
@@ -163,7 +177,9 @@ class MonoDataset(data.Dataset):
             inputs[("inv_K", scale)] = torch.from_numpy(inv_K)
 
         if do_color_aug:
-            color_aug = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
+            # color_aug = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
+            aug_params = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
+            color_aug = partial(color_aug_func, aug_params=aug_params)
         else:
             color_aug = lambda x: x
 
@@ -185,7 +201,6 @@ class MonoDataset(data.Dataset):
             stereo_T[0, 3] = side_sign * baseline_sign * 0.1
 
             inputs["stereo_T"] = torch.from_numpy(stereo_T)
-
         return inputs
 
     def get_color(self, folder, frame_idx, side, do_flip):

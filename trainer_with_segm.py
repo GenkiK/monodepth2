@@ -7,26 +7,84 @@
 from __future__ import absolute_import, division, print_function
 
 import json
+import os
 import time
+from datetime import datetime
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.nn.utils import rnn
 from torch.utils.data import DataLoader
+from torch.utils.data._utils.collate import default_collate
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 import datasets
 import networks
-from kitti_utils import *
-from layers import *
-from utils import *
+from layers import SSIM, BackprojectDepth, Project3D, compute_depth_errors, disp_to_depth, get_smooth_loss, transformation_from_parameters
+from utils import masks_to_pix_heights, normalize_image, readlines, sec_to_hm_str
+
+# def collate_fn(dict_batch):
+#     # batch: [{...} x batch_size]
+#     return {
+#         key: pad_labels([d[key] for d in dict_batch])
+#         if key == "labels"
+#         else default_collate([d[key] for d in dict_batch])
+#         for key in dict_batch[0]
+#     }
 
 
-class Trainer:
+# def pad_labels(batch):
+#     lengths = torch.tensor([len(item) for item in batch])
+#     padded_batch = rnn.pad_sequence(batch, batch_first=True, padding_value=-1)
+#     return padded_batch, lengths
+
+segms_labels_str_set = ("segms", "labels")
+
+
+def collate_fn(dict_batch):
+    # batch: [{...} x batch_size]
+    ret_dct = {key: default_collate([d[key] for d in dict_batch]) for key in dict_batch[0] if key not in segms_labels_str_set}
+    padded_segms, padded_labels, n_insts = pad_segms_labels([d["segms"] for d in dict_batch], [d["labels"] for d in dict_batch])
+    ret_dct["padded_segms"] = padded_segms
+    ret_dct["padded_labels"] = padded_labels
+    ret_dct["n_insts"] = n_insts
+    return ret_dct
+
+
+def pad_segms_labels(batch_segms, batch_labels):
+    n_insts = torch.tensor([len(item) for item in batch_labels])
+    padded_batch_segms = rnn.pad_sequence(batch_segms, batch_first=True, padding_value=0)
+    padded_batch_labels = rnn.pad_sequence(batch_labels, batch_first=True, padding_value=0)
+    return padded_batch_segms, padded_batch_labels, n_insts
+
+
+# def collate_fn(dict_batch):
+#     # batch: [{...} x batch_size]
+#     ret_dct = {default_collate([d[key] for d in dict_batch]) for key in dict_batch[0] if key != "labels"}
+#     padded_labels, n_insts = pad_labels([d["labels"] for d in dict_batch])
+#     ret_dct["padded_labels"] = padded_labels
+#     ret_dct["n_insts"] = n_insts
+#     return ret_dct
+
+
+# def pad_labels(batch_labels):
+#     label_lengths = torch.tensor([len(item) for item in batch_labels])
+#     padded_batch_labels = rnn.pad_sequence(batch_labels, batch_first=True, padding_value=-1)
+#     return padded_batch_labels, label_lengths
+
+
+class TrainerWithSegm:
     def __init__(self, options):
         self.opt = options
-        self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
+        self.log_path = os.path.join(
+            self.opt.root_log_dir,
+            f"{self.opt.width}x{self.opt.height}",
+            f"{self.opt.model_name}{'_' if self.opt.model_name else ''}{datetime.now().strftime('%m-%d-%H:%M')}",
+        )
 
         # checking height and width are multiples of 32
         assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
@@ -65,25 +123,19 @@ class Trainer:
                 self.models["pose_encoder"].to(self.device)
                 self.parameters_to_train += list(self.models["pose_encoder"].parameters())
 
-                self.models["pose"] = networks.PoseDecoder(
-                    self.models["pose_encoder"].num_ch_enc, num_input_features=1, num_frames_to_predict_for=2
-                )
+                self.models["pose"] = networks.PoseDecoder(self.models["pose_encoder"].num_ch_enc, num_input_features=1, num_frames_to_predict_for=2)
 
             elif self.opt.pose_model_type == "shared":
                 self.models["pose"] = networks.PoseDecoder(self.models["encoder"].num_ch_enc, self.num_pose_frames)
 
             elif self.opt.pose_model_type == "posecnn":
-                self.models["pose"] = networks.PoseCNN(
-                    self.num_input_frames if self.opt.pose_model_input == "all" else 2
-                )
+                self.models["pose"] = networks.PoseCNN(self.num_input_frames if self.opt.pose_model_input == "all" else 2)
 
             self.models["pose"].to(self.device)
             self.parameters_to_train += list(self.models["pose"].parameters())
 
         if self.opt.predictive_mask:
-            assert (
-                self.opt.disable_automasking
-            ), "When using predictive_mask, please disable automasking with --disable_automasking"
+            assert self.opt.disable_automasking, "When using predictive_mask, please disable automasking with --disable_automasking"
 
             # Our implementation of the predictive masking baseline has the the same architecture
             # as our depth decoder. We predict a separate mask for each source frame.
@@ -102,11 +154,11 @@ class Trainer:
             self.load_model()
 
         print("Training model named:\n  ", self.opt.model_name)
-        print("Models and tensorboard events files are saved to:\n  ", self.opt.log_dir)
+        print("Models and tensorboard events files are saved to:\n  ", self.log_path)
         print("Training is using:\n  ", self.device)
 
         # data
-        datasets_dict = {"kitti_with_segm": datasets.KITTIRAWDatasetWithSegm, "kitti_odom": datasets.KITTIOdomDataset}
+        datasets_dict = {"kitti": datasets.KITTIRAWDatasetWithSegm, "kitti_odom": datasets.KITTIOdomDataset}
         self.dataset = datasets_dict[self.opt.dataset]
 
         fpath = os.path.join(os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt")
@@ -114,7 +166,6 @@ class Trainer:
         train_filenames = readlines(fpath.format("train"))
         val_filenames = readlines(fpath.format("val"))
         img_ext = ".png" if self.opt.png else ".jpg"
-        segm_ext = ".npz"
 
         num_train_samples = len(train_filenames)
         self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
@@ -128,10 +179,15 @@ class Trainer:
             self.num_scales,
             is_train=True,
             img_ext=img_ext,
-            segm_ext=segm_ext,
         )
         self.train_loader = DataLoader(
-            train_dataset, self.opt.batch_size, True, num_workers=self.opt.num_workers, pin_memory=True, drop_last=True
+            train_dataset,
+            self.opt.batch_size,
+            True,
+            num_workers=self.opt.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=collate_fn,
         )
         val_dataset = self.dataset(
             self.opt.data_path,
@@ -142,10 +198,15 @@ class Trainer:
             self.num_scales,
             is_train=False,
             img_ext=img_ext,
-            segm_ext=segm_ext,
         )
         self.val_loader = DataLoader(
-            val_dataset, self.opt.batch_size, True, num_workers=self.opt.num_workers, pin_memory=True, drop_last=True
+            val_dataset,
+            self.opt.batch_size,
+            True,
+            num_workers=self.opt.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=collate_fn,  # TODO: とりあえずvalでもsegmsを読み込むようにしている．いらないようであれば修正（compute_losses()でsegmsを呼び出している部分をなくす）
         )
         self.val_iter = iter(self.val_loader)
 
@@ -176,6 +237,14 @@ class Trainer:
 
         self.save_opts()
 
+        self.height_priors = TrainerWithSegm.read_height_priors(self.opt.data_path)
+        self.height_priors = self.height_priors.to(self.device)
+
+    @staticmethod
+    def read_height_priors(root_dir: str) -> torch.Tensor:
+        path = os.path.join(root_dir, "height_priors.txt")
+        return torch.from_numpy(np.loadtxt(path, delimiter=" ", dtype=np.float32, ndmin=2))
+
     def set_train(self):
         """Convert all models to training mode"""
         for m in self.models.values():
@@ -198,21 +267,20 @@ class Trainer:
 
     def run_epoch(self):
         """Run a single epoch of training and validation"""
-        self.model_lr_scheduler.step()
 
         print("Training")
         self.set_train()
 
-        for batch_idx, batch_input_dict in enumerate(self.train_loader):
-            # TODO: batch_input_dictの型を見る（process_batch()の中を見るとdictっぽい）
-
+        for batch_idx, batch_input_dict in tqdm(enumerate(self.train_loader)):
             before_op_time = time.time()
 
+            batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
             output_dict, loss_dict = self.process_batch(batch_input_dict)
 
             self.model_optimizer.zero_grad()
             loss_dict["loss"].backward()
             self.model_optimizer.step()
+            self.model_lr_scheduler.step()
 
             duration = time.time() - before_op_time
 
@@ -228,12 +296,11 @@ class Trainer:
 
                 self.log("train", batch_input_dict, output_dict, loss_dict)
                 self.val()
-
             self.step += 1
 
     def process_batch(self, input_dict):
         """Pass a minibatch through the network and generate images and losses"""
-        input_dict = {key: ipt.to(self.device) for key, ipt in input_dict.items()}
+        # input_dict = {key: ipt.to(self.device) for key, ipt in input_dict.items()}
 
         if self.opt.pose_model_type == "shared":
             # If we are using a shared encoder for both depth and pose (as advocated
@@ -245,7 +312,7 @@ class Trainer:
             features = {key: [f[i] for f in all_features] for i, key in enumerate(self.opt.adj_frame_idxs)}
             output_dict = self.models["depth"](features[0])
         else:
-            # Otherwise, we only feed the image with frame_id 0 through the depth encoder
+            # Otherwise, we only feed the image with adj_frame_idx 0 through the depth encoder
             features = self.models["encoder"](input_dict["color_aug", 0, 0])
             output_dict = self.models["depth"](features)
 
@@ -291,16 +358,12 @@ class Trainer:
                     output_dict[("translation", 0, f_i)] = translation
 
                     # Invert the matrix if the frame id is negative
-                    output_dict[("cam_T_cam", 0, f_i)] = transformation_from_parameters(
-                        axisangle[:, 0], translation[:, 0], invert=(f_i < 0)
-                    )
+                    output_dict[("cam_T_cam", 0, f_i)] = transformation_from_parameters(axisangle[:, 0], translation[:, 0], invert=(f_i < 0))
 
         else:
             # Here we input all frames to the pose net (and predict all poses) together
             if self.opt.pose_model_type in ["separate_resnet", "posecnn"]:
-                pose_inputs = torch.cat(
-                    [input_dict[("color_aug", i, 0)] for i in self.opt.adj_frame_idxs if i != "s"], 1
-                )
+                pose_inputs = torch.cat([input_dict[("color_aug", i, 0)] for i in self.opt.adj_frame_idxs if i != "s"], 1)
 
                 if self.opt.pose_model_type == "separate_resnet":
                     pose_inputs = [self.models["pose_encoder"](pose_inputs)]
@@ -314,9 +377,7 @@ class Trainer:
                 if f_i != "s":
                     output_dict[("axisangle", 0, f_i)] = axisangle
                     output_dict[("translation", 0, f_i)] = translation
-                    output_dict[("cam_T_cam", 0, f_i)] = transformation_from_parameters(
-                        axisangle[:, i], translation[:, i]
-                    )
+                    output_dict[("cam_T_cam", 0, f_i)] = transformation_from_parameters(axisangle[:, i], translation[:, i])
 
         return output_dict
 
@@ -324,10 +385,10 @@ class Trainer:
         """Validate the model on a single minibatch"""
         self.set_eval()
         try:
-            input_dict = self.val_iter.next()
+            input_dict = {k: ipt.to(self.device) for k, ipt in next(self.val_iter).items()}
         except StopIteration:
             self.val_iter = iter(self.val_loader)
-            input_dict = self.val_iter.next()
+            input_dict = next(self.val_iter)
 
         with torch.no_grad():
             output_dict, loss_dict = self.process_batch(input_dict)
@@ -354,41 +415,38 @@ class Trainer:
 
             _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
 
-            output_dict[("depth", 0, scale)] = depth
+            output_dict[("depth", scale)] = depth
 
-            for i, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
-
-                if frame_id == "s":
+            for adj_frame_idx in self.opt.adj_frame_idxs[1:]:
+                if adj_frame_idx == "s":
                     T = input_dict["stereo_T"]
                 else:
-                    T = output_dict[("cam_T_cam", 0, frame_id)]
+                    T = output_dict[("cam_T_cam", 0, adj_frame_idx)]
 
                 # from the authors of https://arxiv.org/abs/1712.00175
                 if self.opt.pose_model_type == "posecnn":
-
-                    axisangle = output_dict[("axisangle", 0, frame_id)]
-                    translation = output_dict[("translation", 0, frame_id)]
+                    axisangle = output_dict[("axisangle", 0, adj_frame_idx)]
+                    translation = output_dict[("translation", 0, adj_frame_idx)]
 
                     inv_depth = 1 / depth
                     mean_inv_depth = inv_depth.mean(3, True).mean(2, True)
 
-                    T = transformation_from_parameters(
-                        axisangle[:, 0], translation[:, 0] * mean_inv_depth[:, 0], frame_id < 0
-                    )
+                    T = transformation_from_parameters(axisangle[:, 0], translation[:, 0] * mean_inv_depth[:, 0], adj_frame_idx < 0)
 
                 cam_points = self.backproject_depth[source_scale](depth, input_dict[("inv_K", source_scale)])
                 pix_coords = self.project_3d[source_scale](cam_points, input_dict[("K", source_scale)], T)
 
-                output_dict[("sample", frame_id, scale)] = pix_coords
+                output_dict[("sample", adj_frame_idx, scale)] = pix_coords
 
-                output_dict[("color", frame_id, scale)] = F.grid_sample(
-                    input_dict[("color", frame_id, source_scale)],
-                    output_dict[("sample", frame_id, scale)],
+                output_dict[("color", adj_frame_idx, scale)] = F.grid_sample(
+                    input_dict[("color", adj_frame_idx, source_scale)],
+                    output_dict[("sample", adj_frame_idx, scale)],
                     padding_mode="border",
+                    align_corners=True,
                 )
 
                 if not self.opt.disable_automasking:
-                    output_dict[("color_identity", frame_id, scale)] = input_dict[("color", frame_id, source_scale)]
+                    output_dict[("color_identity", adj_frame_idx, scale)] = input_dict[("color", adj_frame_idx, source_scale)]
 
     def compute_reprojection_loss(self, pred, target):
         """Computes reprojection loss between a batch of predicted and target images"""
@@ -406,10 +464,12 @@ class Trainer:
     def compute_losses(self, input_dict, output_dict):
         """Compute the reprojection and smoothness losses for a minibatch"""
 
-        # TODO: この中で実スケールlossを計算する
-
         loss_dict = {}
         total_loss = 0
+
+        batch_segms: torch.Tensor = input_dict["padded_segms"]
+        batch_labels: torch.Tensor = input_dict["padded_labels"]
+        batch_n_insts: torch.Tensor = input_dict["n_insts"]
 
         for scale in self.opt.scales:
             loss = 0
@@ -420,21 +480,23 @@ class Trainer:
             else:
                 source_scale = 0
 
-            disp = output_dict[("disp", scale)]
-            color = input_dict[("color", 0, scale)]
-            target = input_dict[("color", 0, source_scale)]
+            batch_disp: torch.Tensor = output_dict[("disp", scale)]
+            batch_upscaled_depth: torch.Tensor = output_dict[("depth", scale)]
+            batch_K: torch.Tensor = input_dict[("K", source_scale)]
+            batch_color: torch.Tensor = input_dict[("color", 0, scale)]
+            batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
 
             for frame_idx in self.opt.adj_frame_idxs[1:]:
-                pred = output_dict[("color", frame_idx, scale)]
-                reprojection_losses.append(self.compute_reprojection_loss(pred, target))
+                batch_pred = output_dict[("color", frame_idx, scale)]
+                reprojection_losses.append(self.compute_reprojection_loss(batch_pred, batch_target))
 
             reprojection_losses = torch.cat(reprojection_losses, 1)
 
             if not self.opt.disable_automasking:
                 identity_reprojection_losses = []
                 for frame_idx in self.opt.adj_frame_idxs[1:]:
-                    pred = input_dict[("color", frame_idx, source_scale)]
-                    identity_reprojection_losses.append(self.compute_reprojection_loss(pred, target))
+                    batch_pred = input_dict[("color", frame_idx, source_scale)]
+                    identity_reprojection_losses.append(self.compute_reprojection_loss(batch_pred, batch_target))
 
                 identity_reprojection_losses = torch.cat(identity_reprojection_losses, 1)
 
@@ -463,9 +525,7 @@ class Trainer:
 
             if not self.opt.disable_automasking:
                 # add random numbers to break ties
-                identity_reprojection_loss += (
-                    torch.randn(identity_reprojection_loss.shape, device=self.device) * 0.00001
-                )
+                identity_reprojection_loss += torch.randn(identity_reprojection_loss.shape, device=self.device) * 0.00001
 
                 combined = torch.cat((identity_reprojection_loss, reprojection_loss), dim=1)
             else:
@@ -477,17 +537,19 @@ class Trainer:
                 to_optimize, idxs = torch.min(combined, dim=1)
 
             if not self.opt.disable_automasking:
-                output_dict["identity_selection/{}".format(scale)] = (
-                    idxs > identity_reprojection_loss.shape[1] - 1
-                ).float()
+                output_dict["identity_selection/{}".format(scale)] = (idxs > identity_reprojection_loss.shape[1] - 1).float()
 
             loss += to_optimize.mean()
 
-            mean_disp = disp.mean(2, True).mean(3, True)
-            norm_disp = disp / (mean_disp + 1e-7)
-            smooth_loss = get_smooth_loss(norm_disp, color)
+            mean_disp = batch_disp.mean(2, True).mean(3, True)
+            norm_disp = batch_disp / (mean_disp + 1e-7)
+            smooth_loss = get_smooth_loss(norm_disp, batch_color)
 
             loss += self.opt.disparity_smoothness * smooth_loss / (2**scale)
+
+            rough_metric_loss = self.compute_rough_metric_loss(batch_upscaled_depth, batch_segms, batch_labels, batch_n_insts, batch_K)
+            loss += self.opt.rough_metric_scale_weight * rough_metric_loss / (2**scale)
+
             total_loss += loss
             loss_dict["loss/{}".format(scale)] = loss
 
@@ -495,43 +557,79 @@ class Trainer:
         loss_dict["loss"] = total_loss
         return loss_dict
 
-    def compute_depth_losses(self, input_dict, output_dict, losses):
+    def compute_rough_metric_loss(
+        self, batch_depth: torch.Tensor, batch_segms: torch.Tensor, batch_labels: torch.Tensor, batch_n_insts: torch.Tensor, batch_K: torch.Tensor
+    ) -> float:
+        bs, _, h, w = batch_depth.shape
+        batch_depth = batch_depth.view(bs, h, w)
+
+        assert 1 <= bs < h < w
+        assert batch_n_insts.sum() < bs * batch_segms.shape[1]  # batch_segmsがcompressされていないか
+
+        if batch_n_insts.sum() == 0:
+            return 0.0
+        fy_repeat = batch_K[:, 1, 1].repeat_interleave(batch_n_insts, dim=0)
+        assert fy_repeat.shape == (batch_n_insts.sum(),)
+
+        depth_repeat = batch_depth.repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
+        assert depth_repeat.shape == (batch_n_insts.sum(), h, w)
+
+        segms_flat = batch_segms.view(-1, h, w)
+        non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
+        segms_flat = segms_flat[non_padded_channels]  # exclude padded channels
+        # assert segms_flat.shape == (batch_n_insts.sum(), h, w)
+        if segms_flat.shape != (batch_n_insts.sum(), h, w):
+            breakpoint()
+
+        obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
+
+        obj_pix_heights = masks_to_pix_heights(segms_flat)
+
+        assert (obj_pix_heights < 0).sum() == 0
+
+        labels_flat = batch_labels.view(-1)[non_padded_channels].long()
+        height_priors = self.height_priors[labels_flat, :]
+
+        pred_heights = obj_pix_heights * obj_mean_depths / fy_repeat
+        loss = F.gaussian_nll_loss(input=height_priors[:, 0], target=pred_heights, var=height_priors[:, 1], eps=0.001) / (batch_n_insts > 0).sum()
+        assert not loss.isnan()
+        return loss
+
+    def compute_depth_losses(self, input_dict, output_dict, loss_dict):
         """Compute depth metrics, to allow monitoring during training
 
         This isn't particularly accurate as it averages over the entire batch,
         so is only used to give an indication of validation performance
         """
-        depth_pred = output_dict[("depth", 0, 0)]
-        depth_pred = torch.clamp(F.interpolate(depth_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
-        depth_pred = depth_pred.detach()
+        batch_depth_pred = output_dict[("depth", 0)]
+        batch_depth_pred = torch.clamp(F.interpolate(batch_depth_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
+        batch_depth_pred = batch_depth_pred.detach()
 
-        depth_gt = input_dict["depth_gt"]
-        mask = depth_gt > 0
+        batch_depth_gt = input_dict["depth_gt"]
+        batch_mask = batch_depth_gt > 0
 
         # garg/eigen crop
-        crop_mask = torch.zeros_like(mask)
-        crop_mask[:, :, 153:371, 44:1197] = 1
-        mask = mask * crop_mask
+        batch_crop_mask = torch.zeros_like(batch_mask)
+        batch_crop_mask[:, :, 153:371, 44:1197] = 1
+        batch_mask = batch_mask * batch_crop_mask
 
-        depth_gt = depth_gt[mask]
-        depth_pred = depth_pred[mask]
-        depth_pred *= torch.median(depth_gt) / torch.median(depth_pred)
+        batch_depth_gt = batch_depth_gt[batch_mask]
+        batch_depth_pred = batch_depth_pred[batch_mask]
+        batch_depth_pred *= torch.median(batch_depth_gt) / torch.median(batch_depth_pred)
 
-        depth_pred = torch.clamp(depth_pred, min=1e-3, max=80)
+        batch_depth_pred = torch.clamp(batch_depth_pred, min=1e-3, max=80)
 
-        depth_errors = compute_depth_errors(depth_gt, depth_pred)
+        depth_errors = compute_depth_errors(batch_depth_gt, batch_depth_pred)
 
         for i, metric in enumerate(self.depth_metric_names):
-            losses[metric] = np.array(depth_errors[i].cpu())
+            loss_dict[metric] = np.array(depth_errors[i].cpu())
 
     def log_time(self, batch_idx, duration, loss):
         """Print a logging statement to the terminal"""
         samples_per_sec = self.opt.batch_size / duration
         time_sofar = time.time() - self.start_time
         training_time_left = (self.num_total_steps / self.step - 1.0) * time_sofar if self.step > 0 else 0
-        print_string = (
-            "epoch {:>3} | batch {:>6} | examples/s: {:5.1f}" + " | loss: {:.5f} | time elapsed: {} | time left: {}"
-        )
+        print_string = "epoch {:>3} | batch {:>6} | examples/s: {:5.1f}" + " | loss: {:.5f} | time elapsed: {} | time left: {}"
         print(
             print_string.format(
                 self.epoch,
@@ -543,39 +641,37 @@ class Trainer:
             )
         )
 
-    def log(self, mode, input_dict, output_dict, losses):
+    def log(self, mode, input_dict, output_dict, loss_dict):
         """Write an event to the tensorboard events file"""
         writer = self.writers[mode]
-        for l, v in losses.items():
-            writer.add_scalar("{}".format(l), v, self.step)
+        for name, loss in loss_dict.items():
+            writer.add_scalar("{}".format(name), loss, self.step)
 
         for j in range(min(4, self.opt.batch_size)):  # write a maximum of four images
-            for s in self.opt.scales:
+            for scale in self.opt.scales:
                 for frame_id in self.opt.adj_frame_idxs:
-                    writer.add_image(
-                        "color_{}_{}/{}".format(frame_id, s, j), input_dict[("color", frame_id, s)][j].data, self.step
-                    )
-                    if s == 0 and frame_id != 0:
+                    writer.add_image("color_{}_{}/{}".format(frame_id, scale, j), input_dict[("color", frame_id, scale)][j].data, self.step)
+                    if scale == 0 and frame_id != 0:
                         writer.add_image(
-                            "color_pred_{}_{}/{}".format(frame_id, s, j),
-                            output_dict[("color", frame_id, s)][j].data,
+                            "color_pred_{}_{}/{}".format(frame_id, scale, j),
+                            output_dict[("color", frame_id, scale)][j].data,
                             self.step,
                         )
 
-                writer.add_image("disp_{}/{}".format(s, j), normalize_image(output_dict[("disp", s)][j]), self.step)
+                writer.add_image("disp_{}/{}".format(scale, j), normalize_image(output_dict[("disp", scale)][j]), self.step)
 
                 if self.opt.predictive_mask:
                     for f_idx, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
                         writer.add_image(
-                            "predictive_mask_{}_{}/{}".format(frame_id, s, j),
-                            output_dict["predictive_mask"][("disp", s)][j, f_idx][None, ...],
+                            "predictive_mask_{}_{}/{}".format(frame_id, scale, j),
+                            output_dict["predictive_mask"][("disp", scale)][j, f_idx][None, ...],
                             self.step,
                         )
 
                 elif not self.opt.disable_automasking:
                     writer.add_image(
-                        "automask_{}/{}".format(s, j),
-                        output_dict["identity_selection/{}".format(s)][j][None, ...],
+                        "automask_{}/{}".format(scale, j),
+                        output_dict["identity_selection/{}".format(scale)][j][None, ...],
                         self.step,
                     )
 

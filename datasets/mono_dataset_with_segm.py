@@ -9,12 +9,14 @@ from __future__ import absolute_import, division, print_function
 import copy
 import os
 import random
+from functools import partial
 
 import numpy as np
 import torch
 import torch.utils.data as data
 from PIL import Image  # using pillow-simd for increased speed
 from torchvision import transforms
+from torchvision.transforms import functional as F
 
 
 def load_pil(path):
@@ -25,11 +27,26 @@ def load_pil(path):
             return img.convert("RGB")
 
 
-def load_segm_and_category_as_tensor(path: str) -> tuple[np.ndarray, np.ndarray]:
+def color_aug_func(img, aug_params):
+    for fn_idx in aug_params[0]:
+        factor = aug_params[fn_idx + 1]
+        match fn_idx:
+            case 0:
+                img = F.adjust_brightness(img, factor)
+            case 1:
+                img = F.adjust_contrast(img, factor)
+            case 2:
+                img = F.adjust_saturation(img, factor)
+            case 3:
+                img = F.adjust_hue(img, factor)
+    return img
+
+
+def load_segms_labels_as_tensor(path: str) -> tuple[np.ndarray, np.ndarray]:
     npz = np.load(path)
-    segms = torch.from_numpy(npz["segm"].astype(np.float32))
-    categories = torch.from_numpy(npz["category"].astype(np.int8))
-    return segms, categories
+    segms = torch.from_numpy(npz["segms"].astype(np.uint8))
+    labels = torch.from_numpy(npz["labels"].astype(np.int8))
+    return segms, labels
 
 
 class MonoDatasetWithSegm(data.Dataset):
@@ -75,7 +92,7 @@ class MonoDatasetWithSegm(data.Dataset):
         self.segm_ext = segm_ext
 
         self.pil_loader = load_pil
-        self.tensor_segm_loader = load_segm_and_category_as_tensor
+        self.tensor_segms_labels_loader = load_segms_labels_as_tensor
         self.to_tensor = transforms.ToTensor()
 
         # We need to specify augmentations differently in newer versions of torchvision.
@@ -93,15 +110,15 @@ class MonoDatasetWithSegm(data.Dataset):
             self.hue = 0.1
 
         img_interp = transforms.InterpolationMode.LANCZOS
-        segm_interp = transforms.InterpolationMode.NEAREST
+        # segm_interp = transforms.InterpolationMode.NEAREST
         self.resize_func_dict = {}
         self.segm_resize_func_dict = {}
         for i in range(self.num_scales):
             s = 2**i
             self.resize_func_dict[i] = transforms.Resize((self.height // s, self.width // s), interpolation=img_interp)
-            self.segm_resize_func_dict[i] = transforms.Resize(
-                (self.height // s, self.width // s), interpolation=segm_interp
-            )
+            # self.segm_resize_func_dict[i] = transforms.Resize(
+            #     (self.height // s, self.width // s), interpolation=segm_interp
+            # )
         self.load_depth = self.check_depth()
 
     def preprocess(self, input_dict, color_aug):
@@ -111,22 +128,28 @@ class MonoDatasetWithSegm(data.Dataset):
         images in this item. This ensures that all images input to the pose network receive the
         same augmentation.
         """
-        for key in input_dict.keys():
+        # if not using list(), "dict changed size during iteration" error is thrown.
+        for key in list(input_dict):
             if key[0] == "color":
                 name, f_idx, _ = key
-                for i in range(self.num_scales):
-                    input_dict[(name, f_idx, i)] = self.resize_func_dict[i](input_dict[(name, f_idx, i - 1)])
-            elif key[0] == "segm":
-                name, f_idx, _ = key
-                for i in range(self.num_scales):
-                    input_dict[(name, f_idx, i)] = self.segm_resize_func_dict[i](input_dict[(name, f_idx, i - 1)])
+                for scale in range(self.num_scales):
+                    # i-1をresize funcへの入力とすることで徐々にresizeしていってる．
+                    # TODO: このやり方では縮小しすぎてしまうのでは？論文読んで確かめる
+                    input_dict[(name, f_idx, scale)] = self.resize_func_dict[scale](input_dict[(name, f_idx, scale - 1)])
+            # elif key[0] == "segms":
+            #     name, _ = key
+            #     for scale in range(self.num_scales):
+            #         # resizeによりsegmが消滅したときの処理を追加
+            #         # segmはスケールする必要がない（手法的に，小さくresizeした画像をinputして出てきた深度出力をupscaleするから）
+            #         # もしmonodepth1を使う(v1_multiscale)なら，segmもresizeする必要が出てくる
+            #         input_dict[(name, scale)] = self.segm_resize_func_dict[scale](input_dict[(name, scale - 1)])
 
-        for key in input_dict.keys():
+        for key in list(input_dict):
             f = input_dict[key]
             if key[0] == "color":
-                name, f_idx, i = key
-                input_dict[(name, f_idx, i)] = self.to_tensor(f)
-                input_dict[(name + "_aug", f_idx, i)] = self.to_tensor(color_aug(f))
+                name, f_idx, scale = key
+                input_dict[(name, f_idx, scale)] = self.to_tensor(f)
+                input_dict[(name + "_aug", f_idx, scale)] = self.to_tensor(color_aug(f))
 
     def __len__(self):
         return len(self.filenames)
@@ -177,13 +200,17 @@ class MonoDatasetWithSegm(data.Dataset):
             if i == "s":
                 other_side = {"r": "l", "l": "r"}[side]
                 input_dict[("color", i, -1)] = self.get_color(scene_name, frame_idx, other_side, do_flip)
-                input_dict[("segm", i, -1)] = self.get_segm(scene_name, frame_idx, other_side, do_flip)
             else:
                 input_dict[("color", i, -1)] = self.get_color(scene_name, frame_idx + i, side, do_flip)
-                input_dict[("segm", i, -1)] = self.get_segm(scene_name, frame_idx + i, side, do_flip)
+        # segms and labels doesn't need adjacent frames
+        # if self.is_train:
+        segms, labels = self.get_segms_labels_tensor(scene_name, frame_idx, side, do_flip)
+        input_dict["segms"] = segms
+        input_dict["labels"] = labels
 
         if do_color_aug:
-            color_aug = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
+            aug_params = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
+            color_aug = partial(color_aug_func, aug_params=aug_params)
         else:
             color_aug = lambda x: x
         self.preprocess(input_dict, color_aug)
@@ -203,7 +230,6 @@ class MonoDatasetWithSegm(data.Dataset):
         for i in self.adj_frame_idxs:
             del input_dict[("color", i, -1)]
             del input_dict[("color_aug", i, -1)]
-            del input_dict[("segm", i, -1)]
 
         if self.load_depth:
             depth_gt = self.get_depth(scene_name, frame_idx, side, do_flip)
@@ -220,7 +246,7 @@ class MonoDatasetWithSegm(data.Dataset):
 
         return input_dict
 
-    def get_segm(self, folder, frame_idx, side, do_flip):
+    def get_segms_labels_tensor(self, folder, frame_idx, side, do_flip):
         raise NotImplementedError
 
     def get_color(self, folder, frame_idx, side, do_flip):

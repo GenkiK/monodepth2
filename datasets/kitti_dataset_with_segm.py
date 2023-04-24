@@ -39,9 +39,7 @@ class KITTIDatasetWithSegm(MonoDatasetWithSegm):
         scene_name = line[0]
         frame_idx = int(line[1])
 
-        velo_filename = os.path.join(
-            self.data_path, scene_name, "velodyne_points/data/{:010d}.bin".format(int(frame_idx))
-        )
+        velo_filename = os.path.join(self.data_path, scene_name, "velodyne_points/data/{:010d}.bin".format(int(frame_idx)))
 
         return os.path.isfile(velo_filename)
 
@@ -51,11 +49,13 @@ class KITTIDatasetWithSegm(MonoDatasetWithSegm):
             color = color.transpose(pil.FLIP_LEFT_RIGHT)
         return color
 
-    def get_segm(self, folder, frame_idx, side, do_flip):
-        segms, categories = self.tensor_segm_loader(self.get_segm_path(folder, frame_idx, side))
+    def get_segms_labels_tensor(self, folder, frame_idx, side, do_flip):
+        segms, labels = self.tensor_segms_labels_loader(self.get_segm_path(folder, frame_idx, side))
         if do_flip:
-            return torch.flip(segms, dims=(2,)), categories
-        return segms, categories
+            # return torch.flip(segms, dims=(2,)), labels
+            # compressedを読み込む場合
+            return torch.flip(segms, dims=(1,)), labels
+        return segms, labels
 
     def get_image_path(self, folder, frame_idx, side):
         raise NotImplementedError
@@ -72,12 +72,12 @@ class KITTIRAWDatasetWithSegm(KITTIDatasetWithSegm):
 
     def get_image_path(self, folder, frame_idx, side):
         f_str = "{:010d}{}".format(frame_idx, self.img_ext)
-        image_path = os.path.join(self.data_path, folder, "image_0{}/data".format(self.side_map[side]), f_str)
+        image_path = os.path.join(self.data_path, folder, f"image_{self.width}x{self.height}_0{self.side_map[side]}", f_str)
         return image_path
 
     def get_segm_path(self, folder, frame_idx, side):
         f_str = "{:010d}{}".format(frame_idx, self.segm_ext)
-        segm_path = os.path.join(self.data_path, folder, "segm_0{}/data".format(self.side_map[side]), f_str)
+        segm_path = os.path.join(self.data_path, folder, f"modified_segms_labels_person_car_{self.width}x{self.height}_0{self.side_map[side]}", f_str)
         return segm_path
 
     def get_depth(self, folder, frame_idx, side, do_flip):
@@ -86,9 +86,7 @@ class KITTIRAWDatasetWithSegm(KITTIDatasetWithSegm):
         velo_filename = os.path.join(self.data_path, folder, "velodyne_points/data/{:010d}.bin".format(int(frame_idx)))
 
         depth_gt = generate_depth_map(calib_path, velo_filename, self.side_map[side])
-        depth_gt = skimage.transform.resize(
-            depth_gt, self.full_res_shape[::-1], order=0, preserve_range=True, mode="constant"
-        )
+        depth_gt = skimage.transform.resize(depth_gt, self.full_res_shape[::-1], order=0, preserve_range=True, mode="constant")
 
         if do_flip:
             depth_gt = np.fliplr(depth_gt)
