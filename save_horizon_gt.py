@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from kitti_horizon.kitti_horizon_raw import KITTIHorizonRaw
+from kitti_horizon.kitti_horizon_raw_monodepth import KITTIHorizonRawMonodepth
 
 
 def horizon2edge_pos(horizon: np.ndarray, h: int, w: int) -> np.ndarray:
@@ -33,7 +33,7 @@ if __name__ == "__main__":
         RAW_ROOT_DIR = Path("/home/gkinoshita/dataset/packnet-kitti-raw/KITTI_raw")
         ROOT_DIR = Path("/home/gkinoshita/workspace/monodepth2/kitti_data/")
 
-        dataset = KITTIHorizonRaw(dataset_path=RAW_ROOT_DIR, resize_height=h, resize_width=w)
+        dataset = KITTIHorizonRawMonodepth(dataset_path=RAW_ROOT_DIR, resize_height=h, resize_width=w)
         for date_dir in ROOT_DIR.iterdir():
             if not date_dir.is_dir():
                 continue

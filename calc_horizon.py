@@ -4,7 +4,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from kitti_horizon.kitti_horizon_raw import KITTIHorizonRaw
+from kitti_horizon.kitti_horizon_raw_monodepth import KITTIHorizonRawMonodepth
 
 BICYCLE_LABEL = 1
 MOTORCYCLE_LABEL = 3
@@ -103,7 +103,7 @@ if __name__ == "__main__":
     RAW_ROOT_DIR = Path("/home/gkinoshita/humpback/dataset/packnet-kitti-raw/KITTI_raw")
     ROOT_DIR = Path("/home/gkinoshita/humpback/workspace/monodepth2/kitti_data/")
 
-    dataset = KITTIHorizonRaw(dataset_path=RAW_ROOT_DIR, resize_height=h, resize_width=w)
+    dataset = KITTIHorizonRawMonodepth(dataset_path=RAW_ROOT_DIR, resize_height=h, resize_width=w)
     for date_dir in ROOT_DIR.iterdir():
         if not date_dir.is_dir():
             continue
@@ -121,7 +121,6 @@ if __name__ == "__main__":
                 cam_idx = 0 if cam_number == "2" else 1
 
                 for road_idx, road_path in enumerate(sorted(road_dir.glob("*npy"))[:5]):
-
                     data = dataset.process_single_image(drive, drive.get_rgb(road_idx)[cam_idx], road_idx, int(cam_number))
                     processed_img = data["image"].transpose(1, 2, 0)
                     hp1 = data["horizon_p1"]

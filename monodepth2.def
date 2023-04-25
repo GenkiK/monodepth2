@@ -32,6 +32,10 @@ From: nvidia/cuda:11.7.0-cudnn8-runtime-ubuntu18.04
     pip --no-cache-dir install scikit-image
     pip --no-cache-dir install tqdm
 
+    # libraries for detecting outliers
+    pip --no-cache-dir install scikit-learn
+    pip --no-cache-dir install pykitti
+
 %environment
     # pip install --user でインストールしたものを使わない
     export PYTHONNOUSERSITE=1
