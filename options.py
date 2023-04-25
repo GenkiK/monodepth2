@@ -18,11 +18,11 @@ class MonodepthOptions:
 
         # PATHS
         self.parser.add_argument("--data_path", type=str, help="path to the training data", default=os.path.join(file_dir, "kitti_data"))
-        # self.parser.add_argument("--log_dir", type=str, help="log directory", default=os.path.join(os.path.expanduser("~"), "tmp"))
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "logs"))
 
         # TRAINING options
-        # self.parser.add_argument("--model_name", type=str, help="the name of the folder to save the model in", default="mdp")
+        self.parser.add_argument("--resume", help="whether resuming training", action="store_true")
+        self.parser.add_argument("--ckpt_timestamp", type=str, help="this arg is valid only when specifying --resume")
         self.parser.add_argument("--model_name", type=str, help="the name of the folder to save the model in", default="")
         self.parser.add_argument(
             "--split",
@@ -59,7 +59,7 @@ class MonodepthOptions:
         # OPTIMIZATION options
         self.parser.add_argument("--batch_size", type=int, help="batch size", default=12)
         self.parser.add_argument("--learning_rate", type=float, help="learning rate", default=1e-4)
-        self.parser.add_argument("--num_epochs", type=int, help="number of epochs", default=20)
+        self.parser.add_argument("--num_epochs", type=int, help="number of epochs (including epochs of suspended training)", default=100)
         self.parser.add_argument("--scheduler_step_size", type=int, help="step size of the scheduler", default=15)
 
         # ABLATION options
@@ -95,7 +95,7 @@ class MonodepthOptions:
         self.parser.add_argument("--num_workers", type=int, help="number of dataloader workers", default=12)
 
         # LOADING options
-        self.parser.add_argument("--load_weights_folder", type=str, help="name of model to load")
+        # self.parser.add_argument("--load_weights_folder", type=str, help="name of model to load")
         self.parser.add_argument(
             "--models_to_load",
             nargs="+",
@@ -105,7 +105,7 @@ class MonodepthOptions:
         )
 
         # LOGGING options
-        self.parser.add_argument("--log_frequency", type=int, help="number of batches between each tensorboard log", default=250)
+        self.parser.add_argument("--log_frequency", type=int, help="number of batches between each tensorboard log", default=200)
         self.parser.add_argument("--save_frequency", type=int, help="number of epochs between each save", default=1)
 
         # EVALUATION options

@@ -9,7 +9,9 @@ from __future__ import absolute_import, division, print_function
 import json
 import os
 import time
+from argparse import Namespace
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -79,12 +81,25 @@ def pad_segms_labels(batch_segms, batch_labels):
 
 class TrainerWithSegm:
     def __init__(self, options):
+        can_resume = options.resume and options.ckpt_timestamp
         self.opt = options
-        self.log_path = os.path.join(
-            self.opt.root_log_dir,
-            f"{self.opt.width}x{self.opt.height}",
-            f"{self.opt.model_name}{'_' if self.opt.model_name else ''}{datetime.now().strftime('%m-%d-%H:%M')}",
-        )
+
+        if can_resume:
+            # self.load_opts()
+            self.log_path = os.path.join(
+                self.opt.root_log_dir,
+                f"{self.opt.width}x{self.opt.height}",
+                f"{self.opt.model_name}{'_' if self.opt.model_name else ''}{self.opt.ckpt_timestamp}",
+            )
+            if not os.path.exists(self.log_path):
+                raise FileNotFoundError(f"{self.log_path} does not exist.")
+        else:
+            # self.opt = options
+            self.log_path = os.path.join(
+                options.root_log_dir,
+                f"{options.width}x{options.height}",
+                f"{options.model_name}{'_' if options.model_name else ''}{datetime.now().strftime('%m-%d-%H:%M')}",
+            )
 
         # checking height and width are multiples of 32
         assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
@@ -106,7 +121,7 @@ class TrainerWithSegm:
         if self.opt.use_stereo:
             self.opt.adj_frame_idxs.append("s")
 
-        self.models["encoder"] = networks.ResnetEncoder(self.opt.num_layers, self.opt.weights_init == "pretrained")
+        self.models["encoder"] = networks.ResnetEncoder(self.opt.num_layers, self.opt.weights_init == "pretrained" and not can_resume)
         self.models["encoder"].to(self.device)
         self.parameters_to_train += list(self.models["encoder"].parameters())
 
@@ -117,7 +132,7 @@ class TrainerWithSegm:
         if self.use_pose_net:
             if self.opt.pose_model_type == "separate_resnet":
                 self.models["pose_encoder"] = networks.ResnetEncoder(
-                    self.opt.num_layers, self.opt.weights_init == "pretrained", num_input_images=self.num_pose_frames
+                    self.opt.num_layers, self.opt.weights_init == "pretrained" and not can_resume, num_input_images=self.num_pose_frames
                 )
 
                 self.models["pose_encoder"].to(self.device)
@@ -148,10 +163,13 @@ class TrainerWithSegm:
             self.parameters_to_train += list(self.models["predictive_mask"].parameters())
 
         self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
+        self.epoch = 0
+        if can_resume:
+            weights_dir, self.epoch = self.search_last_epoch()
+            self.epoch += 1
+            self.load_model(weights_dir)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, self.opt.scheduler_step_size, 0.1)
-
-        if self.opt.load_weights_folder is not None:
-            self.load_model()
+        self.model_lr_scheduler.last_epoch = self.epoch - 1
 
         print("Training model named:\n  ", self.opt.model_name)
         print("Models and tensorboard events files are saved to:\n  ", self.log_path)
@@ -257,13 +275,17 @@ class TrainerWithSegm:
 
     def train(self):
         """Run the entire training pipeline"""
-        self.epoch = 0
-        self.step = 0
+        self.step = self.epoch * len(self.train_loader)
         self.start_time = time.time()
-        for self.epoch in range(self.opt.num_epochs):
-            self.run_epoch()
+        min_val_loss = 1000000
+        for self.epoch in range(self.epoch, self.opt.num_epochs):
+            val_loss = self.run_epoch()
             if (self.epoch + 1) % self.opt.save_frequency == 0:
-                self.save_model()
+                if val_loss < min_val_loss:
+                    self.save_model(is_best=True)
+                    min_val_loss = val_loss
+                else:
+                    self.save_model(is_best=False)
 
     def run_epoch(self):
         """Run a single epoch of training and validation"""
@@ -284,19 +306,21 @@ class TrainerWithSegm:
 
             duration = time.time() - before_op_time
 
-            # log less frequently after the first 2000 steps to save time & disk space
+            # # log less frequently after the first 2000 steps to save time & disk space
+            # early_phase = batch_idx % self.opt.log_frequency == 0 and self.step < 2000
+            # late_phase = self.step % 2000 == 0
             early_phase = batch_idx % self.opt.log_frequency == 0 and self.step < 2000
-            late_phase = self.step % 2000 == 0
+            late_phase = self.step >= 2000 and self.step % 1000 == 0
 
             if early_phase or late_phase:
                 self.log_time(batch_idx, duration, loss_dict["loss"].cpu().data)
 
                 if "depth_gt" in batch_input_dict:
                     self.compute_depth_losses(batch_input_dict, output_dict, loss_dict)
-
                 self.log("train", batch_input_dict, output_dict, loss_dict)
-                self.val()
             self.step += 1
+        val_loss = self.val()
+        return val_loss
 
     def process_batch(self, input_dict):
         """Pass a minibatch through the network and generate images and losses"""
@@ -397,9 +421,11 @@ class TrainerWithSegm:
                 self.compute_depth_losses(input_dict, output_dict, loss_dict)
 
             self.log("val", input_dict, output_dict, loss_dict)
+            loss = loss_dict["loss"]
             del input_dict, output_dict, loss_dict
 
         self.set_train()
+        return loss
 
     def generate_images_pred(self, input_dict, output_dict):
         """Generate the warped (reprojected) color images for a minibatch.
@@ -539,19 +565,24 @@ class TrainerWithSegm:
             if not self.opt.disable_automasking:
                 output_dict["identity_selection/{}".format(scale)] = (idxs > identity_reprojection_loss.shape[1] - 1).float()
 
-            loss += to_optimize.mean()
+            # loss += to_optimize.mean()
+            final_reprojection_loss = to_optimize.mean()
+            loss_dict[f"loss/reprojection_{scale}"] = final_reprojection_loss
+            loss += final_reprojection_loss
 
             mean_disp = batch_disp.mean(2, True).mean(3, True)
             norm_disp = batch_disp / (mean_disp + 1e-7)
             smooth_loss = get_smooth_loss(norm_disp, batch_color)
 
+            loss_dict[f"loss/smoothness_{scale}"] = smooth_loss
             loss += self.opt.disparity_smoothness * smooth_loss / (2**scale)
 
             rough_metric_loss = self.compute_rough_metric_loss(batch_upscaled_depth, batch_segms, batch_labels, batch_n_insts, batch_K)
+            loss_dict[f"loss/rough_metric_{scale}"] = rough_metric_loss
             loss += self.opt.rough_metric_scale_weight * rough_metric_loss / (2**scale)
 
             total_loss += loss
-            loss_dict["loss/{}".format(scale)] = loss
+            loss_dict[f"loss/{scale}"] = loss
 
         total_loss /= self.num_scales
         loss_dict["loss"] = total_loss
@@ -577,9 +608,7 @@ class TrainerWithSegm:
         segms_flat = batch_segms.view(-1, h, w)
         non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
         segms_flat = segms_flat[non_padded_channels]  # exclude padded channels
-        # assert segms_flat.shape == (batch_n_insts.sum(), h, w)
-        if segms_flat.shape != (batch_n_insts.sum(), h, w):
-            breakpoint()
+        assert segms_flat.shape == (batch_n_insts.sum(), h, w)
 
         obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
 
@@ -685,14 +714,28 @@ class TrainerWithSegm:
         with open(os.path.join(models_dir, "opt.json"), "w") as f:
             json.dump(to_save, f, indent=2)
 
-    def save_model(self):
+    def load_opts(self):
+        json_path = os.path.join(self.log_path, "models", "opt.json")
+        try:
+            with open(json_path, "r") as f:
+                self.opt = Namespace()
+                for k, v in json.load(f):
+                    setattr(self.opt, k, v)
+                print("TODO: namespaceがきちんと読み込まれているかを確認")
+                breakpoint()
+        except FileNotFoundError:
+            print(f"FileNotFoundError: option json file path {self.log_path} does not exist.")
+
+    def save_model(self, is_best=False):
         """Save model weights to disk"""
-        save_folder = os.path.join(self.log_path, "models", "weights_{}".format(self.epoch))
+        if is_best:
+            save_best_folder = os.path.join(self.log_path, "models", "best_weights")
+        save_folder = os.path.join(self.log_path, "models", f"weights_{self.epoch}")
         if not os.path.exists(save_folder):
             os.makedirs(save_folder)
 
         for model_name, model in self.models.items():
-            save_path = os.path.join(save_folder, "{}.pth".format(model_name))
+            save_path = os.path.join(save_folder, f"{model_name}.pth")
             to_save = model.state_dict()
             if model_name == "encoder":
                 # save the sizes - these are needed at prediction time
@@ -700,31 +743,78 @@ class TrainerWithSegm:
                 to_save["width"] = self.opt.width
                 to_save["use_stereo"] = self.opt.use_stereo
             torch.save(to_save, save_path)
+            if is_best:
+                torch.save(to_save, os.path.join(save_best_folder, f"{model_name}.pth"))
 
-        save_path = os.path.join(save_folder, "{}.pth".format("adam"))
-        torch.save(self.model_optimizer.state_dict(), save_path)
+        optimizer_save_path = os.path.join(save_folder, "adam.pth")
+        torch.save(self.model_optimizer.state_dict(), optimizer_save_path)
+        if is_best:
+            torch.save(self.model_optimizer.state_dict(), os.path.join(save_best_folder, "adam.pth"))
+        # scheduler_save_path = os.path.join(save_folder, "scheduler.pth")
+        # torch.save(self.model_lr_scheduler.state_dict(), scheduler_save_path)
 
-    def load_model(self):
+    # def load_model(self):
+    #     """Load model(s) from disk"""
+    #     self.opt.load_weights_folder = os.path.expanduser(self.opt.load_weights_folder)
+
+    #     assert os.path.isdir(self.opt.load_weights_folder), "Cannot find folder {}".format(self.opt.load_weights_folder)
+    #     print("loading model from folder {}".format(self.opt.load_weights_folder))
+
+    #     for n in self.opt.models_to_load:
+    #         print("Loading {} weights...".format(n))
+    #         path = os.path.join(self.opt.load_weights_folder, "{}.pth".format(n))
+    #         model_dict = self.models[n].state_dict()
+    #         pretrained_dict = torch.load(path)
+    #         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+    #         model_dict.update(pretrained_dict)
+    #         self.models[n].load_state_dict(model_dict)
+
+    #     # loading adam state
+    #     optimizer_load_path = os.path.join(self.opt.load_weights_folder, "adam.pth")
+    #     if os.path.isfile(optimizer_load_path):
+    #         print("Loading Adam weights")
+    #         optimizer_dict = torch.load(optimizer_load_path)
+    #         self.model_optimizer.load_state_dict(optimizer_dict)
+    #     else:
+    #         print("Cannot find Adam weights so Adam is randomly initialized")
+
+    def search_last_epoch(self) -> tuple[Path, int]:
+        root_weights_dir = Path(self.log_path) / "models"
+        last_epoch = -1
+        for weights_dir in root_weights_dir.glob("weights_*"):
+            epoch = int(weights_dir.name[8:])
+            if epoch > last_epoch:
+                last_epoch = epoch
+        return root_weights_dir / f"weights_{last_epoch}", last_epoch
+
+    def load_model(self, weights_dir: Path):
         """Load model(s) from disk"""
-        self.opt.load_weights_folder = os.path.expanduser(self.opt.load_weights_folder)
 
-        assert os.path.isdir(self.opt.load_weights_folder), "Cannot find folder {}".format(self.opt.load_weights_folder)
-        print("loading model from folder {}".format(self.opt.load_weights_folder))
+        print(f"loading model from folder {weights_dir}")
 
-        for n in self.opt.models_to_load:
-            print("Loading {} weights...".format(n))
-            path = os.path.join(self.opt.load_weights_folder, "{}.pth".format(n))
-            model_dict = self.models[n].state_dict()
+        for model_name in self.opt.models_to_load:
+            print("Loading {} weights...".format(model_name))
+            path = weights_dir / f"{model_name}.pth"
+            model_dict = self.models[model_name].state_dict()
             pretrained_dict = torch.load(path)
             pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
             model_dict.update(pretrained_dict)
-            self.models[n].load_state_dict(model_dict)
+            self.models[model_name].load_state_dict(model_dict)
 
         # loading adam state
-        optimizer_load_path = os.path.join(self.opt.load_weights_folder, "adam.pth")
-        if os.path.isfile(optimizer_load_path):
+        optimizer_load_path = weights_dir / "adam.pth"
+        if optimizer_load_path.exists():
             print("Loading Adam weights")
             optimizer_dict = torch.load(optimizer_load_path)
             self.model_optimizer.load_state_dict(optimizer_dict)
         else:
             print("Cannot find Adam weights so Adam is randomly initialized")
+
+        # # loading scheduler state
+        # scheduler_load_path = weights_dir.parent / "scheduler.pth"
+        # if scheduler_load_path.exists():
+        #     print("Loading learning rate scheduler weights")
+        #     scheduler_dict = torch.load(scheduler_load_path)
+        #     self.model_lr_scheduler.load_state_dict(scheduler_dict)
+        # else:
+        #     print(f"Cannot find scheduler weights so it is initialized with last_epoch={self.epoch - 1}")
