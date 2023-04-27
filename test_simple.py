@@ -9,14 +9,13 @@ from __future__ import absolute_import, division, print_function
 import argparse
 import glob
 import os
-import sys
 
 import matplotlib as mpl
 import matplotlib.cm as cm
 import numpy as np
 import PIL.Image as pil
 import torch
-from torchvision import datasets, transforms
+from torchvision import transforms
 
 import networks
 from evaluate_depth import STEREO_SCALE_FACTOR
