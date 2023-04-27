@@ -7,9 +7,6 @@ import numpy as np
 from tqdm import tqdm
 
 ROOT_DIR = Path("/home/gkinoshita/workspace/monodepth2/kitti_data/")
-BICYCLE_LABEL = 1
-MOTORCYCLE_LABEL = 3
-INVALID_LABELS = {BICYCLE_LABEL, MOTORCYCLE_LABEL}
 
 
 def masks_to_pix_heights(masks: np.ndarray) -> np.ndarray:
@@ -39,11 +36,6 @@ def erode(segms: np.ndarray, kernel) -> tuple[np.ndarray, np.ndarray]:
 #     return segms, labels
 
 
-def valid_segms_labels(segms: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    valid_idxs = [i for i, label in enumerate(labels) if label not in INVALID_LABELS]
-    return segms[valid_idxs], labels[valid_idxs]
-
-
 def generate_cam_grid(h, w, invK: np.ndarray):
     x_pix, y_pix = np.meshgrid(np.arange(w), np.arange(h))
     pix_grid = np.stack([x_pix, y_pix, np.ones([h, w])])  # [3,h,w] ([:,x,y]がpixel x, yにおけるhomogeneous vector)
@@ -67,9 +59,18 @@ def cam_pts2cam_height(cam_pts: np.ndarray, road_mask: np.ndarray) -> np.ndarray
 
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--manydepth", action="store_true", help="whether using depth maps estimated with manydepth or monodepth2")
     parser.add_argument("--img_height", type=int, default=320, help="input image height")
     parser.add_argument("--img_width", type=int, default=1024, help="input image width")
     parser.add_argument("--kernel_size", type=int, default=5, help="the size of kernel for eroding instance segment")
+    parser.add_argument("--save_file_stem", type=str, default="cam_height", help="the file is saved as '{save_file_stem}_{resolution}.csv")
+    parser.add_argument(
+        "--segm_dir_stem",
+        type=str,
+        default="modified_segms_labels_person_car",
+        help="'segm files are loaded from {segm_dir_stem}_{resolution}_0{cam_number}' directory",
+    )
+
     return parser
 
 
@@ -108,7 +109,8 @@ if __name__ == "__main__":
     #  'Pedestrian': (1.7607065, 0.012825643),
     # }
     resolution = f"{w}x{h}"
-    with open(ROOT_DIR / f"cam_height_{resolution}.csv", "w") as f:
+    csv_filename = ROOT_DIR / f"{args.save_file_stem}_{resolution}{'_manydepth' if args.manydepth else ''}.csv"
+    with open(csv_filename, "w") as f:
         writer = csv.writer(f)
         header = ("expectation", "variance", "n_inst")
         writer.writerow(header)
@@ -119,9 +121,8 @@ if __name__ == "__main__":
                 for camera_number in camera_numbers:
                     data_dir_tpl = str(scene_dir / ("{}_" + resolution + "_0" + camera_number))
                     road_dir = Path(data_dir_tpl.format("road_segm"))
-                    segms_labels_dir = Path(data_dir_tpl.format("modified_segms_labels_person_car"))
+                    segms_labels_dir = Path(data_dir_tpl.format(args.segm_dir_stem))
                     disp_dir = Path(data_dir_tpl.format("disp"))
-                    img_dir = Path(data_dir_tpl.format("image"))
 
                     basis_normal = None
                     road_paths = sorted(road_dir.glob("*npy"))
@@ -132,7 +133,8 @@ if __name__ == "__main__":
                         if road_mask.sum() == 0:
                             continue
                         segms_labels = np.load(segms_labels_dir / f"{road_path.stem}.npz")
-                        segms, labels = valid_segms_labels(segms_labels["segms"], segms_labels["labels"])
+                        segms, labels = segms_labels["segms"], segms_labels["labels"]
+                        # segms, labels = valid_segms_labels(segms_labels["segms"], segms_labels["labels"])
                         if segms.shape[0] == 0:
                             continue
 
@@ -140,7 +142,10 @@ if __name__ == "__main__":
                         segms = segms[sorted_idxs]
                         labels = labels[sorted_idxs]
 
-                        disp = np.load(disp_dir / str(road_path.name).replace(".npy", "_disp.npy")).reshape(h, w)
+                        if args.manydepth:
+                            disp = np.load(disp_dir / road_path.name).reshape(h, w)
+                        else:
+                            disp = np.load(disp_dir / str(road_path.name).replace(".npy", "_disp.npy")).reshape(h, w)
                         depth = 1 / disp
                         eroded_segms, erode_valid_idxs = erode(segms, erode_kernel)
                         if erode_valid_idxs.shape[0] == 0:
