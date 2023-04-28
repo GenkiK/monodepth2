@@ -7,11 +7,23 @@
 from __future__ import absolute_import, division, print_function
 
 import numpy as np
-
 import torch
 import torch.nn as nn
-import torchvision.models as models
 import torch.utils.model_zoo as model_zoo
+import torchvision.models as models
+
+# FIXME: なぜかclioneではtorchvision.models.resnet.model_urlsが無いというエラーが出るので一旦ハードコード
+model_urls = {
+    "resnet18": "https://download.pytorch.org/models/resnet18-f37072fd.pth",
+    "resnet34": "https://download.pytorch.org/models/resnet34-b627a593.pth",
+    "resnet50": "https://download.pytorch.org/models/resnet50-0676ba61.pth",
+    "resnet101": "https://download.pytorch.org/models/resnet101-63fe2227.pth",
+    "resnet152": "https://download.pytorch.org/models/resnet152-394f9c45.pth",
+    "resnext50_32x4d": "https://download.pytorch.org/models/resnext50_32x4d-7cdf4587.pth",
+    "resnext101_32x8d": "https://download.pytorch.org/models/resnext101_32x8d-8ba56ff5.pth",
+    "wide_resnet50_2": "https://download.pytorch.org/models/wide_resnet50_2-95faca4d.pth",
+    "wide_resnet101_2": "https://download.pytorch.org/models/wide_resnet101_2-32ee1156.pth",
+}
 
 
 class ResNetMultiImageInput(models.ResNet):
@@ -52,7 +64,9 @@ def resnet_multiimage_input(num_layers, pretrained=False, num_input_images=1):
     model = ResNetMultiImageInput(block_type, blocks, num_input_images=num_input_images)
 
     if pretrained:
-        loaded = model_zoo.load_url(models.resnet.model_urls["resnet{}".format(num_layers)])
+        # FIXME: fix hard coding of model_urls
+        # loaded = model_zoo.load_url(models.resnet.model_urls["resnet{}".format(num_layers)])
+        loaded = model_zoo.load_url(model_urls["resnet{}".format(num_layers)])
         loaded["conv1.weight"] = torch.cat([loaded["conv1.weight"]] * num_input_images, 1) / num_input_images
         model.load_state_dict(loaded)
     return model

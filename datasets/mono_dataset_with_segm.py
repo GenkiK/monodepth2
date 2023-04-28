@@ -75,6 +75,7 @@ class MonoDatasetWithSegm(data.Dataset):
         is_train=False,
         img_ext=".jpg",
         segm_ext=".npz",
+        segm_dirname="modified_segms_labels_person_car",
     ):
         super().__init__()
 
@@ -83,6 +84,7 @@ class MonoDatasetWithSegm(data.Dataset):
         self.height = height
         self.width = width
         self.num_scales = num_scales
+        self.segm_dirname = segm_dirname  # used for get_segm_path() in KITTIRAWDatasetWithSegm
         # self.interp = Image.ANTIALIAS
 
         self.adj_frame_idxs = adj_frame_idxs  # default: [0, -1, 1]

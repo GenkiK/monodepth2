@@ -60,6 +60,7 @@ def cam_pts2cam_height(cam_pts: np.ndarray, road_mask: np.ndarray) -> np.ndarray
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manydepth", action="store_true", help="whether using depth maps estimated with manydepth or monodepth2")
+    parser.add_argument("--height_annot", action="store_true", help="whether using car height avg as height prior of cars")
     parser.add_argument("--img_height", type=int, default=320, help="input image height")
     parser.add_argument("--img_width", type=int, default=1024, help="input image width")
     parser.add_argument("--kernel_size", type=int, default=5, help="the size of kernel for eroding instance segment")
@@ -88,20 +89,21 @@ if __name__ == "__main__":
     invK = np.linalg.pinv(K)
     cam_grid = generate_cam_grid(h, w, invK)
 
-    # FIXME: 一旦
-    # height_priors = np.loadtxt(ROOT_DIR / "height_priors.txt", dtype=np.float32)
-    height_priors = np.array(
-        [
-            [1.747149944305419922e00, 6.863836944103240967e-02],
-            [np.nan, np.nan],
-            [1.5260834, 0.01868551],
-            [np.nan, np.nan],
-            [np.nan, np.nan],
-            [np.nan, np.nan],
-            [np.nan, np.nan],
-            [np.nan, np.nan],
-        ]
-    )
+    if args.height_annot:
+        height_priors = np.array(
+            [
+                [1.747149944305419922e00, 6.863836944103240967e-02],
+                [np.nan, np.nan],
+                [1.5260834, 0.01868551],
+                [np.nan, np.nan],
+                [np.nan, np.nan],
+                [np.nan, np.nan],
+                [np.nan, np.nan],
+                [np.nan, np.nan],
+            ]
+        )
+    else:
+        height_priors = np.loadtxt(ROOT_DIR / "height_priors.txt", dtype=np.float32)
 
     # KITTI dataset
     #
@@ -122,10 +124,15 @@ if __name__ == "__main__":
                     data_dir_tpl = str(scene_dir / ("{}_" + resolution + "_0" + camera_number))
                     road_dir = Path(data_dir_tpl.format("road_segm"))
                     segms_labels_dir = Path(data_dir_tpl.format(args.segm_dir_stem))
-                    disp_dir = Path(data_dir_tpl.format("disp"))
+                    if args.manydepth:
+                        disp_dir = Path(data_dir_tpl.format("disp_manydepth_multi"))
+                    else:
+                        disp_dir = Path(data_dir_tpl.format("disp"))
 
                     basis_normal = None
                     road_paths = sorted(road_dir.glob("*npy"))
+                    if args.manydepth:
+                        road_paths = road_paths[1:]
                     n_frame = len(road_paths)
                     cam_heights = np.full((n_frame, 3), np.nan, dtype=np.float64)
                     for frame_idx, road_path in enumerate(tqdm(road_paths)):

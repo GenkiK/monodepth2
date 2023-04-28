@@ -4,6 +4,9 @@ CKPT_TIMESTAMP="04-23-17:56"
 # Our standard mono model
 CUDA_VISIBLE_DEVICES=7 python $ROOT_DIR/train_with_segm.py --model_name M_1024x320 --height 320 --width 1024 --resume --ckpt_timestamp $CKPT_TIMESTAMP
 
+# train w/o outlier segms
+CUDA_VISIBLE_DEVICES=7 python $ROOT_DIR/train_with_segm.py --model_name person_car_annot_height_offset4_th06_min_inst10 --height 320 --width 1024 --segm_dirname modified_segms_labels_person_car_annot_height_offset4_th06_min_inst10
+
 # # Our low resolution mono model
 # python ../train.py --model_name M_416x128 \
 #   --height 128 --width 416

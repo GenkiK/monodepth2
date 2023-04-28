@@ -21,6 +21,12 @@ class MonodepthOptions:
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "logs"))
 
         # TRAINING options
+        self.parser.add_argument(
+            "--segm_dirname",
+            type=str,
+            help="prefix of segm directory name like `{modified_segms_labels_person_car}",
+            default="modified_segms_labels_person_car",
+        )
         self.parser.add_argument("--resume", help="whether resuming training", action="store_true")
         self.parser.add_argument("--ckpt_timestamp", type=str, help="this arg is valid only when specifying --resume")
         self.parser.add_argument("--model_name", type=str, help="the name of the folder to save the model in", default="")

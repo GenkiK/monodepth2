@@ -77,7 +77,8 @@ class KITTIRAWDatasetWithSegm(KITTIDatasetWithSegm):
 
     def get_segm_path(self, folder, frame_idx, side):
         f_str = "{:010d}{}".format(frame_idx, self.segm_ext)
-        segm_path = os.path.join(self.data_path, folder, f"modified_segms_labels_person_car_{self.width}x{self.height}_0{self.side_map[side]}", f_str)
+        # segm_path = os.path.join(self.data_path, folder, f"modified_segms_labels_person_car_{self.width}x{self.height}_0{self.side_map[side]}", f_str)
+        segm_path = os.path.join(self.data_path, folder, f"{self.segm_dirname}_{self.width}x{self.height}_0{self.side_map[side]}", f_str)
         return segm_path
 
     def get_depth(self, folder, frame_idx, side, do_flip):

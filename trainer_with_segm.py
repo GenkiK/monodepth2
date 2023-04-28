@@ -197,6 +197,7 @@ class TrainerWithSegm:
             self.num_scales,
             is_train=True,
             img_ext=img_ext,
+            segm_dirname=self.opt.segm_dirname,
         )
         self.train_loader = DataLoader(
             train_dataset,
@@ -216,6 +217,7 @@ class TrainerWithSegm:
             self.num_scales,
             is_train=False,
             img_ext=img_ext,
+            segm_dirname=self.opt.segm_dirname,
         )
         self.val_loader = DataLoader(
             val_dataset,
@@ -730,6 +732,8 @@ class TrainerWithSegm:
         """Save model weights to disk"""
         if is_best:
             save_best_folder = os.path.join(self.log_path, "models", "best_weights")
+            if not os.path.exists(save_best_folder):
+                os.makedirs(save_best_folder)
         save_folder = os.path.join(self.log_path, "models", f"weights_{self.epoch}")
         if not os.path.exists(save_folder):
             os.makedirs(save_folder)
