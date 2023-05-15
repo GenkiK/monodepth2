@@ -66,7 +66,7 @@ def resnet_multiimage_input(num_layers, pretrained=False, num_input_images=1):
     if pretrained:
         # FIXME: fix hard coding of model_urls
         # loaded = model_zoo.load_url(models.resnet.model_urls["resnet{}".format(num_layers)])
-        loaded = model_zoo.load_url(model_urls["resnet{}".format(num_layers)])
+        loaded = model_zoo.load_url(model_urls[f"resnet{num_layers}"])
         loaded["conv1.weight"] = torch.cat([loaded["conv1.weight"]] * num_input_images, 1) / num_input_images
         model.load_state_dict(loaded)
     return model

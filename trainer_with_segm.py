@@ -29,21 +29,6 @@ import networks
 from layers import SSIM, BackprojectDepth, Project3D, compute_depth_errors, disp_to_depth, get_smooth_loss, transformation_from_parameters
 from utils import masks_to_pix_heights, normalize_image, readlines, sec_to_hm_str
 
-# def collate_fn(dict_batch):
-#     # batch: [{...} x batch_size]
-#     return {
-#         key: pad_labels([d[key] for d in dict_batch])
-#         if key == "labels"
-#         else default_collate([d[key] for d in dict_batch])
-#         for key in dict_batch[0]
-#     }
-
-
-# def pad_labels(batch):
-#     lengths = torch.tensor([len(item) for item in batch])
-#     padded_batch = rnn.pad_sequence(batch, batch_first=True, padding_value=-1)
-#     return padded_batch, lengths
-
 segms_labels_str_set = ("segms", "labels")
 
 
@@ -62,21 +47,6 @@ def pad_segms_labels(batch_segms, batch_labels):
     padded_batch_segms = rnn.pad_sequence(batch_segms, batch_first=True, padding_value=0)
     padded_batch_labels = rnn.pad_sequence(batch_labels, batch_first=True, padding_value=0)
     return padded_batch_segms, padded_batch_labels, n_insts
-
-
-# def collate_fn(dict_batch):
-#     # batch: [{...} x batch_size]
-#     ret_dct = {default_collate([d[key] for d in dict_batch]) for key in dict_batch[0] if key != "labels"}
-#     padded_labels, n_insts = pad_labels([d["labels"] for d in dict_batch])
-#     ret_dct["padded_labels"] = padded_labels
-#     ret_dct["n_insts"] = n_insts
-#     return ret_dct
-
-
-# def pad_labels(batch_labels):
-#     label_lengths = torch.tensor([len(item) for item in batch_labels])
-#     padded_batch_labels = rnn.pad_sequence(batch_labels, batch_first=True, padding_value=-1)
-#     return padded_batch_labels, label_lengths
 
 
 class TrainerWithSegm:
@@ -228,8 +198,6 @@ class TrainerWithSegm:
             drop_last=True,
             collate_fn=collate_fn,  # TODO: とりあえずvalでもsegmsを読み込むようにしている．いらないようであれば修正（compute_losses()でsegmsを呼び出している部分をなくす）
         )
-        self.val_iter = iter(self.val_loader)
-
         self.writers = {}
         for mode in ["train", "val"]:
             self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
@@ -250,15 +218,29 @@ class TrainerWithSegm:
             self.project_3d[scale] = Project3D(self.opt.batch_size, h, w)
             self.project_3d[scale].to(self.device)
 
-        self.depth_metric_names = ["de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3"]
+        self.depth_metric_names = ["de/abse", "de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3"]
+        self.standard_metric = self.opt.standard_metric
+        if not (self.standard_metric in self.depth_metric_names or self.standard_metric == "loss"):
+            raise KeyError(f"{self.standard_metric} is not in {self.depth_metric_names + ['loss']}")
 
         print("Using split:\n  ", self.opt.split)
         print("There are {:d} training items and {:d} validation items\n".format(len(train_dataset), len(val_dataset)))
 
-        self.save_opts()
-
-        self.height_priors = TrainerWithSegm.read_height_priors(self.opt.data_path)
+        if self.opt.annot_height:
+            self.height_priors = np.array(
+                [
+                    [1.747149944305419922e00, 6.863836944103240967e-02],
+                    [np.nan, np.nan],
+                    [1.5260834, 0.01868551],
+                ]
+            )
+            print("\nUsing annotated object height.\n")
+        else:
+            self.height_priors = TrainerWithSegm.read_height_priors(self.opt.data_path)
+            print("\nUsing calculated object height.\n")
         self.height_priors = self.height_priors.to(self.device)
+
+        self.save_opts()
 
     @staticmethod
     def read_height_priors(root_dir: str) -> torch.Tensor:
@@ -279,23 +261,26 @@ class TrainerWithSegm:
         """Run the entire training pipeline"""
         self.step = self.epoch * len(self.train_loader)
         self.start_time = time.time()
-        min_val_loss = 1000000
+        lower_is_better = self.standard_metric[:2] == "de" or self.standard_metric == "loss"
+        th_best = 1000000 if lower_is_better else -1
+
+        print(f"========= Training has started from {self.epoch}epoch. ========= ")
         for self.epoch in range(self.epoch, self.opt.num_epochs):
-            val_loss = self.run_epoch()
-            if (self.epoch + 1) % self.opt.save_frequency == 0:
-                if val_loss < min_val_loss:
-                    self.save_model(is_best=True)
-                    min_val_loss = val_loss
-                else:
-                    self.save_model(is_best=False)
+            self.run_epoch()
+            val_loss_dict = self.val()
+            val_loss = val_loss_dict[self.standard_metric]
+            if (lower_is_better and val_loss < th_best) or (not lower_is_better and val_loss > th_best):
+                self.save_model(is_best=True)
+                th_best = val_loss
+            else:
+                self.save_model(is_best=False)
 
     def run_epoch(self):
         """Run a single epoch of training and validation"""
-
         print("Training")
         self.set_train()
 
-        for batch_idx, batch_input_dict in tqdm(enumerate(self.train_loader)):
+        for batch_idx, batch_input_dict in tqdm(enumerate(self.train_loader), dynamic_ncols=True):
             before_op_time = time.time()
 
             batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
@@ -304,13 +289,10 @@ class TrainerWithSegm:
             self.model_optimizer.zero_grad()
             loss_dict["loss"].backward()
             self.model_optimizer.step()
-            self.model_lr_scheduler.step()
 
             duration = time.time() - before_op_time
 
-            # # log less frequently after the first 2000 steps to save time & disk space
-            # early_phase = batch_idx % self.opt.log_frequency == 0 and self.step < 2000
-            # late_phase = self.step % 2000 == 0
+            # log less frequently after the first 2000 steps to save time & disk space
             early_phase = batch_idx % self.opt.log_frequency == 0 and self.step < 2000
             late_phase = self.step >= 2000 and self.step % 1000 == 0
 
@@ -319,10 +301,10 @@ class TrainerWithSegm:
 
                 if "depth_gt" in batch_input_dict:
                     self.compute_depth_losses(batch_input_dict, output_dict, loss_dict)
-                self.log("train", batch_input_dict, output_dict, loss_dict)
+                self.log_train(batch_input_dict, output_dict, loss_dict)
             self.step += 1
-        val_loss = self.val()
-        return val_loss
+
+        self.model_lr_scheduler.step()
 
     def process_batch(self, input_dict):
         """Pass a minibatch through the network and generate images and losses"""
@@ -410,24 +392,25 @@ class TrainerWithSegm:
     def val(self):
         """Validate the model on a single minibatch"""
         self.set_eval()
-        try:
-            input_dict = {k: ipt.to(self.device) for k, ipt in next(self.val_iter).items()}
-        except StopIteration:
-            self.val_iter = iter(self.val_loader)
-            input_dict = next(self.val_iter)
-
+        avg_loss_dict = {}
         with torch.no_grad():
-            output_dict, loss_dict = self.process_batch(input_dict)
-
-            if "depth_gt" in input_dict:
-                self.compute_depth_losses(input_dict, output_dict, loss_dict)
-
-            self.log("val", input_dict, output_dict, loss_dict)
-            loss = loss_dict["loss"]
-            del input_dict, output_dict, loss_dict
-
-        self.set_train()
-        return loss
+            for batch_input_dict in self.val_loader:
+                batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
+                batch_output_dict, loss_dict = self.process_batch(batch_input_dict)
+                if "depth_gt" in batch_input_dict:
+                    self.compute_depth_losses(batch_input_dict, batch_output_dict, loss_dict)
+                for loss_name in loss_dict:
+                    if loss_name in avg_loss_dict:
+                        avg_loss_dict[loss_name] += loss_dict[loss_name]
+                    else:
+                        avg_loss_dict[loss_name] = loss_dict[loss_name]
+                del batch_input_dict, batch_output_dict, loss_dict
+            n_iter = len(self.val_loader)
+            for loss_name in avg_loss_dict:
+                avg_loss_dict[loss_name] /= n_iter
+            self.log_val(avg_loss_dict)
+            self.set_train()
+            return avg_loss_dict
 
     def generate_images_pred(self, input_dict, output_dict):
         """Generate the warped (reprojected) color images for a minibatch.
@@ -491,7 +474,6 @@ class TrainerWithSegm:
 
     def compute_losses(self, input_dict, output_dict):
         """Compute the reprojection and smoothness losses for a minibatch"""
-
         loss_dict = {}
         total_loss = 0
 
@@ -622,7 +604,8 @@ class TrainerWithSegm:
         height_priors = self.height_priors[labels_flat, :]
 
         pred_heights = obj_pix_heights * obj_mean_depths / fy_repeat
-        loss = F.gaussian_nll_loss(input=height_priors[:, 0], target=pred_heights, var=height_priors[:, 1], eps=0.001) / (batch_n_insts > 0).sum()
+        # loss = F.gaussian_nll_loss(input=height_priors[:, 0], target=pred_heights, var=height_priors[:, 1], eps=0.001) / (batch_n_insts > 0).sum()
+        loss = F.gaussian_nll_loss(input=height_priors[:, 0], target=pred_heights, var=height_priors[:, 1], reduction="mean") / self.batch_size
         assert not loss.isnan()
         return loss
 
@@ -646,7 +629,8 @@ class TrainerWithSegm:
 
         batch_depth_gt = batch_depth_gt[batch_mask]
         batch_depth_pred = batch_depth_pred[batch_mask]
-        batch_depth_pred *= torch.median(batch_depth_gt) / torch.median(batch_depth_pred)
+        # turnoff median scaling
+        # batch_depth_pred *= torch.median(batch_depth_gt) / torch.median(batch_depth_pred)
 
         batch_depth_pred = torch.clamp(batch_depth_pred, min=1e-3, max=80)
 
@@ -672,39 +656,45 @@ class TrainerWithSegm:
             )
         )
 
-    def log(self, mode, input_dict, output_dict, loss_dict):
+    def log_train(self, input_dict, output_dict, loss_dict):
         """Write an event to the tensorboard events file"""
-        writer = self.writers[mode]
+        writer = self.writers["train"]
         for name, loss in loss_dict.items():
-            writer.add_scalar("{}".format(name), loss, self.step)
+            writer.add_scalar(f"{name}", loss, self.step)
 
-        for j in range(min(4, self.opt.batch_size)):  # write a maximum of four images
-            for scale in self.opt.scales:
-                for frame_id in self.opt.adj_frame_idxs:
-                    writer.add_image("color_{}_{}/{}".format(frame_id, scale, j), input_dict[("color", frame_id, scale)][j].data, self.step)
-                    if scale == 0 and frame_id != 0:
+        if self.opt.log_image:
+            for j in range(min(4, self.opt.batch_size)):  # write a maximum of four images
+                for scale in self.opt.scales:
+                    for frame_id in self.opt.adj_frame_idxs:
+                        writer.add_image(f"color_{frame_id}_{scale}/{j}", input_dict[("color", frame_id, scale)][j].data, self.step)
+                        if scale == 0 and frame_id != 0:
+                            writer.add_image(
+                                f"color_pred_{frame_id}_{scale}/{j}",
+                                output_dict[("color", frame_id, scale)][j].data,
+                                self.step,
+                            )
+
+                    writer.add_image("disp_{}/{}".format(scale, j), normalize_image(output_dict[("disp", scale)][j]), self.step)
+
+                    if self.opt.predictive_mask:
+                        for f_idx, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
+                            writer.add_image(
+                                f"predictive_mask_{frame_id}_{scale}/{j}",
+                                output_dict["predictive_mask"][("disp", scale)][j, f_idx][None, ...],
+                                self.step,
+                            )
+
+                    elif not self.opt.disable_automasking:
                         writer.add_image(
-                            "color_pred_{}_{}/{}".format(frame_id, scale, j),
-                            output_dict[("color", frame_id, scale)][j].data,
+                            f"automask_{scale}/{j}",
+                            output_dict[f"identity_selection/{scale}"][j][None, ...],
                             self.step,
                         )
 
-                writer.add_image("disp_{}/{}".format(scale, j), normalize_image(output_dict[("disp", scale)][j]), self.step)
-
-                if self.opt.predictive_mask:
-                    for f_idx, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
-                        writer.add_image(
-                            "predictive_mask_{}_{}/{}".format(frame_id, scale, j),
-                            output_dict["predictive_mask"][("disp", scale)][j, f_idx][None, ...],
-                            self.step,
-                        )
-
-                elif not self.opt.disable_automasking:
-                    writer.add_image(
-                        "automask_{}/{}".format(scale, j),
-                        output_dict["identity_selection/{}".format(scale)][j][None, ...],
-                        self.step,
-                    )
+    def log_val(self, loss_dict):
+        """Write an event to the tensorboard events file"""
+        for name, loss in loss_dict.items():
+            self.writers["val"].add_scalar(name, loss, self.step)
 
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with"""

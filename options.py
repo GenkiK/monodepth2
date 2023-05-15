@@ -21,6 +21,16 @@ class MonodepthOptions:
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "logs"))
 
         # TRAINING options
+        self.parser.add_argument("--random_seed", help="random seed", type=int)
+        self.parser.add_argument("--annot_height", action="store_true", help="whether using KITTI height labels")
+        self.parser.add_argument(
+            "--standard_metric",
+            type=str,
+            help="metric as an indicator of best model",
+            choices=["de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3", "loss"],
+            default="loss",
+        )
+
         self.parser.add_argument(
             "--segm_dirname",
             type=str,
@@ -98,7 +108,7 @@ class MonodepthOptions:
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda", help="if set disables CUDA", action="store_true")
-        self.parser.add_argument("--num_workers", type=int, help="number of dataloader workers", default=12)
+        self.parser.add_argument("--num_workers", type=int, help="number of dataloader workers", default=6)
 
         # LOADING options
         # self.parser.add_argument("--load_weights_folder", type=str, help="name of model to load")
@@ -111,7 +121,9 @@ class MonodepthOptions:
         )
 
         # LOGGING options
-        self.parser.add_argument("--log_frequency", type=int, help="number of batches between each tensorboard log", default=200)
+        self.parser.add_argument("--log_frequency", type=int, help="number of batches between each tensorboard log", default=500)
+        self.parser.add_argument("--log_image", action="store_true", help="whether saving disparities, automasks and images in log")
+        ## save_frequency is invalid in trainer_with_segm.py
         self.parser.add_argument("--save_frequency", type=int, help="number of epochs between each save", default=1)
 
         # EVALUATION options
@@ -119,7 +131,8 @@ class MonodepthOptions:
         self.parser.add_argument("--eval_mono", help="if set evaluates in mono mode", action="store_true")
         self.parser.add_argument("--disable_median_scaling", help="if set disables median scaling in evaluation", action="store_true")
         self.parser.add_argument("--pred_depth_scale_factor", help="if set multiplies predictions by this number", type=float, default=1)
-        self.parser.add_argument("--ext_disp_to_eval", type=str, help="optional path to a .npy disparities file to evaluate")
+        # self.parser.add_argument("--ext_disp_to_eval", type=str, help="optional path to a .npy disparities file to evaluate")
+        self.parser.add_argument("--disp_filename_to_eval", type=str, help=".npy disparity filename to evaluate")
         self.parser.add_argument(
             "--eval_split",
             type=str,
@@ -140,6 +153,7 @@ class MonodepthOptions:
             help="if set will perform the flipping post processing " "from the original monodepth paper",
             action="store_true",
         )
+        self.parser.add_argument("--epoch_for_eval", help="the number epochs for using evaluation", type=int)
 
     def parse(self):
         self.options = self.parser.parse_args()

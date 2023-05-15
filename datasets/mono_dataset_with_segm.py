@@ -6,8 +6,6 @@
 
 from __future__ import absolute_import, division, print_function
 
-import copy
-import os
 import random
 from functools import partial
 
@@ -112,7 +110,6 @@ class MonoDatasetWithSegm(data.Dataset):
             self.hue = 0.1
 
         img_interp = transforms.InterpolationMode.LANCZOS
-        # segm_interp = transforms.InterpolationMode.NEAREST
         self.resize_func_dict = {}
         self.segm_resize_func_dict = {}
         for i in range(self.num_scales):
@@ -168,7 +165,7 @@ class MonoDatasetWithSegm(data.Dataset):
             "stereo_T"                                   for camera extrinsics, and
             "depth_gt"                                   for ground truth depth maps.
 
-        <adj_frame_id> is either:
+        <adj_frame_idx> is either:
             an integer (e.g. 0, -1, or 1) representing the temporal step relative to 'index',
         or
             "s" for the opposite image in the stereo pair.
@@ -217,6 +214,9 @@ class MonoDatasetWithSegm(data.Dataset):
             color_aug = lambda x: x
         self.preprocess(input_dict, color_aug)
 
+        for i in self.adj_frame_idxs:
+            del input_dict[("color", i, -1)]
+            del input_dict[("color_aug", i, -1)]
         # adjusting intrinsics to match each scale in the pyramid
         for scale in range(self.num_scales):
             K = self.K.copy()
@@ -228,10 +228,6 @@ class MonoDatasetWithSegm(data.Dataset):
 
             input_dict[("K", scale)] = torch.from_numpy(K)
             input_dict[("inv_K", scale)] = torch.from_numpy(inv_K)
-
-        for i in self.adj_frame_idxs:
-            del input_dict[("color", i, -1)]
-            del input_dict[("color_aug", i, -1)]
 
         if self.load_depth:
             depth_gt = self.get_depth(scene_name, frame_idx, side, do_flip)
@@ -245,7 +241,6 @@ class MonoDatasetWithSegm(data.Dataset):
             stereo_T[0, 3] = side_sign * baseline_sign * 0.1
 
             input_dict["stereo_T"] = torch.from_numpy(stereo_T)
-
         return input_dict
 
     def get_segms_labels_tensor(self, folder, frame_idx, side, do_flip):

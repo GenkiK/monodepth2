@@ -77,7 +77,7 @@ def export_disp(args):
     encoder.to(device)
     encoder.eval()
 
-    print("   Loading pretrained decoder")
+    print("Loading pretrained decoder")
     depth_decoder = networks.DepthDecoder(num_ch_enc=encoder.num_ch_enc, scales=range(4))
 
     loaded_dict = torch.load(depth_decoder_path, map_location=device)
@@ -118,9 +118,7 @@ def export_disp(args):
                         outputs = depth_decoder(features)
 
                         disp = outputs[("disp", 0)]
-                        disp_resized = torch.nn.functional.interpolate(
-                            disp, (original_height, original_width), mode="bilinear", align_corners=False
-                        )
+                        disp_resized = torch.nn.functional.interpolate(disp, (original_height, original_width), mode="bilinear", align_corners=False)
 
                         # Saving numpy file
                         output_name = os.path.splitext(os.path.basename(img_path))[0]
@@ -136,7 +134,7 @@ def export_disp(args):
                         colormapped_im = (mapper.to_rgba(disp_resized_np)[:, :, :3] * 255).astype(np.uint8)
                         im = pil.fromarray(colormapped_im)
 
-                        name_dest_im = output_dir / f"{output_name}_disp.jpeg"
+                        name_dest_im = output_dir / f"{output_name}_disp.jpg"
                         im.save(name_dest_im)
 
                         print("   - {}".format(name_dest_im))

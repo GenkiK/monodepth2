@@ -4,7 +4,8 @@ echo "script is runnning"
 echo ""
 
 # train w/ outlier segms
-CUDA_VISIBLE_DEVICES=2 python -OO $ROOT_DIR/train_with_segm.py --model_name person_car_with_outliers --height 320 --width 1024 --segm_dirname modified_segms_labels_person_car
+#orca
+CUDA_VISIBLE_DEVICES=0 python -OO $ROOT_DIR/train.py --model_name original --height 320 --width 1024
 
 # # Our low resolution mono model
 # python ../train.py --model_name M_416x128 \

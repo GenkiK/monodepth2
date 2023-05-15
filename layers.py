@@ -247,6 +247,8 @@ def compute_depth_errors(gt, pred):
     a2 = (thresh < 1.25**2).float().mean()
     a3 = (thresh < 1.25**3).float().mean()
 
+    abse = torch.mean(torch.abs(gt - pred))
+
     rmse = (gt - pred) ** 2
     rmse = torch.sqrt(rmse.mean())
 
@@ -257,4 +259,4 @@ def compute_depth_errors(gt, pred):
 
     sq_rel = torch.mean((gt - pred) ** 2 / gt)
 
-    return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
+    return abse, abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
