@@ -1,5 +1,6 @@
 import argparse
 from copy import deepcopy
+from functools import cache
 from itertools import combinations
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def load_segms_and_labels(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return segms, labels
 
 
+@cache
 def calc_vanishing_point(t0: np.ndarray, b0: np.ndarray, b: np.ndarray, r: np.ndarray, H: float, R: float) -> tuple[float, float] | None:
     a0 = b0[0]
     c0 = t0[1]
@@ -64,7 +66,6 @@ if __name__ == "__main__":
     th_str = str(remove_th).replace(".", "")
     min_inst = 10
 
-    # FIXME: add "640x192"
     resolutions = ("1024x320",)
     camera_numbers = ("2", "3")
     root_dir = Path("/home/gkinoshita/workspace/monodepth2/kitti_data")
@@ -83,7 +84,7 @@ if __name__ == "__main__":
         height_path = root_dir / "height_priors.txt"
         height_priors = np.loadtxt(height_path)
 
-    save_dir_prefix = "modified_segms_labels_person_car"
+    segm_dir_prefix = "modified_segms_labels_person_car_wo_corner"
 
     for date_dir in root_dir.iterdir():
         if not date_dir.is_dir():
@@ -92,55 +93,41 @@ if __name__ == "__main__":
             for res in resolutions:
                 img_w, img_h = map(int, res.split("x"))
                 for cam_number in camera_numbers:
-                    # segm_dir = scene_dir / f"segms_labels_{resolution}_0{camera_number}"
-                    segm_dir = scene_dir / f"modified_segms_labels_person_car_{res}_0{cam_number}"
+                    segm_dir = scene_dir / f"{segm_dir_prefix}_{res}_0{cam_number}"
                     save_dir = (
-                        scene_dir / f"{save_dir_prefix}{str_annot_height}_offset{n_ransac_offset}_th{th_str}_min_inst{min_inst}_{res}_0{cam_number}"
+                        scene_dir / f"{segm_dir_prefix}{str_annot_height}_offset{n_ransac_offset}_th{th_str}_min_inst{min_inst}_{res}_0{cam_number}"
                     )
                     save_dir.mkdir(parents=False, exist_ok=True)
 
-                    # img_paths = sorted(img_dir.glob("*jpg"))
                     segm_paths = sorted(segm_dir.glob("*npz"))
 
-                    cumsum_n_inst = []
-                    scene_n_inst = []
+                    cumsum_n_inst = [0] * len(segm_paths)
+                    scene_n_inst = [0] * len(segm_paths)
 
-                    scene_heights: list[np.ndarray] = []
-                    scene_tops: list[np.ndarray] = []
-                    scene_bottoms: list[np.ndarray] = []
-                    # scene_curr2original_idx: list[dict[int, int]] = []
+                    scene_heights: list[np.ndarray] = [np.array([])] * len(segm_paths)
+                    scene_tops: list[np.ndarray] = [np.array([])] * len(segm_paths)
+                    scene_bottoms: list[np.ndarray] = [np.array([])] * len(segm_paths)
 
-                    # for f_idx in range(len(img_paths)):
                     for f_idx in range(len(segm_paths)):
-                        # 表示のためだけの画像/horizon読み込み
-                        # img_path = img_paths[f_idx]
-
                         segm_path = segm_paths[f_idx]
                         segms, labels = load_segms_and_labels(segm_path)
 
                         n_inst = segms.shape[0]
-                        scene_n_inst.append(n_inst)
-                        if f_idx == 0:
-                            cumsum_n_inst.append(n_inst)
-                        else:
-                            cumsum_n_inst.append(cumsum_n_inst[f_idx - 1] + n_inst)
+                        scene_n_inst[f_idx] = n_inst
+                        cumsum_n_inst[f_idx] = n_inst if f_idx == 0 else cumsum_n_inst[f_idx - 1] + n_inst
 
                         if n_inst > 0:
                             boxes = masks_to_boxes(segms)
-                            seq_heights = height_priors[labels, 0]
+                            heights = height_priors[labels, 0]
                             mid_xs = (boxes[:, 0] + boxes[:, 2]) / 2
                             top_ys = img_h - boxes[:, 1]
                             bottom_ys = img_h - boxes[:, 3]
-                            seq_tops = np.stack((mid_xs, top_ys), axis=1)
-                            seq_bottoms = np.stack((mid_xs, bottom_ys), axis=1)
-                            scene_heights.append(seq_heights)
-                            scene_tops.append(seq_tops)
-                            scene_bottoms.append(seq_bottoms)
-                        else:
-                            # print(f"{segm_path} has no instance.")
-                            scene_heights.append(np.array([]))
-                            scene_tops.append(np.array([]))
-                            scene_bottoms.append(np.array([]))
+                            tops = np.stack((mid_xs, top_ys), axis=1)
+                            bottoms = np.stack((mid_xs, bottom_ys), axis=1)
+                            scene_heights[f_idx] = heights
+                            scene_tops[f_idx] = tops
+                            scene_bottoms[f_idx] = bottoms
+                        # else: scene_xxx[f_idx] = np.array([])
 
                     # 各物体の登場回数(計算に使われた回数)
                     scene_segm_occur_cnts = [np.zeros(n_inst, dtype=np.uint16) for n_inst in scene_n_inst]
@@ -148,7 +135,7 @@ if __name__ == "__main__":
                     scene_segm_outlier_cnts = deepcopy(scene_segm_occur_cnts)
 
                     ransac = linear_model.RANSACRegressor()
-                    for f_idx in range(len(segm_paths)):  # ここで物体が登場しなかったものがseqの１つとしてカウントされなかった場合，フレーム間が指定より飛びすぎてしまうのでよくない→
+                    for f_idx in range(len(segm_paths)):  # ここで物体が登場しなかったものがseqの１つとしてカウントされなかった場合，フレーム間が指定より飛びすぎてしまうのでよくない
                         start_f_idx = max(0, f_idx - n_ransac_offset)
                         end_f_idx = f_idx + n_ransac_offset
                         seq_heights = np.concatenate(scene_heights[start_f_idx : end_f_idx + 1])
@@ -210,7 +197,7 @@ if __name__ == "__main__":
                             else:
                                 n_inst_in_prev_j = cumsum_n_inst[j_f_idx - 1] - cumsum_n_inst[start_f_idx - 1]
                             vp_x_y_lst[0].append(vp[0])
-                            vp_x_y_lst[1].append(img_h - vp[1])  # imshowのときはy軸が左上原点になる
+                            vp_x_y_lst[1].append(img_h - vp[1])  # imshowのときはy軸が左上原点になる. RANSACとしてはどうでもいい
 
                             vp_idx2f_idxs.append([i_f_idx, j_f_idx])
                             vp_idx2segm_idxs_in_frame.append([i - n_inst_in_prev_i, j - n_inst_in_prev_j])
@@ -234,9 +221,9 @@ if __name__ == "__main__":
                                 scene_segm_outlier_cnts[outlier_f_idxs[1]][outlier_segm_idxs_in_frame[1]] += 1
 
                     for f_idx in range(len(segm_paths)):
-                        # 各フレームの物体のうち，VP計算に使われなかった物体は，除外しないようにする
-                        # TODO: ↑これで本当にいいのか検証
-                        scene_segm_occur_cnts[f_idx][scene_segm_occur_cnts[f_idx] == 0] = LARGE_VALUE
+                        # HACK: 各フレームの物体のうち，VP計算に使われなかった物体は，除外する
+                        scene_segm_occur_cnts[f_idx][scene_segm_occur_cnts[f_idx] == 0] = 1
+                        scene_segm_outlier_cnts[f_idx][scene_segm_occur_cnts[f_idx] == 0] = LARGE_VALUE
                         inlier_segm_bools = scene_segm_outlier_cnts[f_idx] / scene_segm_occur_cnts[f_idx] <= remove_th
 
                         segms, labels = load_segms_and_labels(segm_paths[f_idx])

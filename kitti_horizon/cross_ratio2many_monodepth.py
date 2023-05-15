@@ -1,3 +1,4 @@
+import argparse
 from copy import deepcopy
 from itertools import combinations
 from pathlib import Path
@@ -93,22 +94,41 @@ def concat_removing_empties(arr_lst: list[np.ndarray]) -> np.ndarray:
         return np.array([], dtype=np.float32)
 
 
-if __name__ == "__main__":
-    is_humpback = False
-    random_state = 42
-    n_show_img = None
-    n_ransac_offset = 4
-    remove_th = 0.6
-    ransac_min_inst = 10
+def get_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--wo_corner", action="store_true", help="whether using segms without corner instances")
+    parser.add_argument("--wo_small", action="store_true", help="whether using segms without small instances")
+    parser.add_argument("--area_th", type=int, help="threshold of an instance area as small instances")
+    parser.add_argument("--n_ransac_offset", type=int, default=4, help="the number of offset images for RANSAC")
+    parser.add_argument("--ransac_min_inst", type=int, default=10, help="the min number of instances whether calculating RANSAC")
+    parser.add_argument("--remove_th", type=float, default=0.6, help="threshold for regarding instances as outliers")
+    return parser.parse_args()
 
-    root_dir = Path(f"/home/gkinoshita/{'humpback/' if is_humpback else ''}workspace/monodepth2/kitti_data")
+
+if __name__ == "__main__":
+    add_humpback = False
+    random_state = 42
+
+    args = get_args()
+    wo_corner = args.wo_corner
+    wo_small = args.wo_small
+    area_th = args.area_th
+    n_ransac_offset = args.n_ransac_offset
+    ransac_min_inst = args.ransac_min_inst
+    remove_th = args.remove_th
+
+    root_dir = Path(f"/home/gkinoshita/{'humpback/' if add_humpback else ''}workspace/monodepth2/kitti_data")
     height_path = root_dir / "height_priors.txt"
     height_priors = np.loadtxt(height_path)
-    # FIXME: uncomment below codes
     resolutions = ("1024x320",)
     camera_numbers = ("2",)
 
-    root_save_dir = Path(f"./outliers_monodepth2_person_car_offset{n_ransac_offset}_th{str(remove_th).replace('.', '')}_min_inst{ransac_min_inst}")
+    kitti_horizon_dir = Path("/home/gkinoshita/workspace/kitti_horizon")
+    root_save_dir = (
+        kitti_horizon_dir
+        / f"outliers_monodepth2_person_car{'_wo_corner' if wo_corner else ''}{'_wo_small' if wo_small else ''}{area_th if wo_small and area_th > 0 else ''}_offset{n_ransac_offset}_th{str(remove_th).replace('.', '')}_min_inst{ransac_min_inst}"
+    )
+
     root_save_dir.mkdir(parents=False, exist_ok=True)
 
     for date_dir in root_dir.iterdir():
@@ -118,16 +138,16 @@ if __name__ == "__main__":
             for resolution in resolutions:
                 img_w, img_h = map(int, resolution.split("x"))
                 for camera_number in camera_numbers:
-                    # segm_dir = scene_dir / f"segms_labels_{resolution}_0{camera_number}"
-                    segm_dir = scene_dir / f"modified_segms_labels_person_car_{resolution}_0{camera_number}"
+                    segm_dir = (
+                        scene_dir
+                        / f"modified_segms_labels_person_car{'_wo_corner' if wo_corner else ''}{'_wo_small' if wo_small else ''}{area_th if wo_small and area_th > 0 else ''}_{resolution}_0{camera_number}"
+                    )
                     img_dir = scene_dir / f"image_{resolution}_0{camera_number}"
                     horizon_dir = scene_dir / f"horizon_{resolution}_0{camera_number}"
                     save_dir = root_save_dir / str(scene_dir).replace(str(root_dir), "")[1:] / f"{resolution}_0{camera_number}"
                     save_dir.mkdir(parents=True, exist_ok=True)
 
                     img_paths = sorted(img_dir.glob("*jpg"))
-
-                    eff_n_show_img = len(img_paths) if n_show_img is None else min(n_show_img, len(img_paths))
 
                     cumsum_n_inst = []
                     scene_n_inst = []
@@ -139,7 +159,7 @@ if __name__ == "__main__":
                     scene_tops: list[np.ndarray] = []
                     scene_bottoms: list[np.ndarray] = []
 
-                    for f_idx in range(eff_n_show_img):
+                    for f_idx in range(len(img_paths)):
                         # 表示のためだけの画像/horizon読み込み
                         img_path = img_paths[f_idx]
                         img = np.array(Image.open(img_path))
