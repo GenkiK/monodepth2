@@ -75,6 +75,7 @@ def evaluate_and_export_disp(opt):
             device = torch.device("cuda")
         else:
             device = torch.device("cpu")
+        print(f"Using device: {device}")
 
         if opt.epoch_for_eval is None:
             weights_dir = log_path / "models" / "best_weights"
@@ -212,17 +213,17 @@ def evaluate_and_export_disp(opt):
     mean_errors_scaling = np.array(errors_scaling).mean(0)
 
     print("\n  " + ("{:>8} | " * 8).format("abse", "abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
-    print(("&{: 8.3f}  " * 8).format(*mean_errors.tolist()) + "\\\\")
-    print(("&{: 8.3f}  " * 8).format(*mean_errors_scaling.tolist()) + "\\\\")
+    print(("|{: 8.3f}  " * 8).format(*mean_errors.tolist()) + "|")
+    print(("|{: 8.3f}  " * 8).format(*mean_errors_scaling.tolist()) + "|")
 
     output_filename = f"result_{'best_model' if opt.epoch_for_eval is None else opt.epoch_for_eval}.txt"
     with open(save_dir / output_filename, "w") as f:
         f.write(f"Scaling ratios | med: {med:0.3f} | std: {np.std(ratios / med):0.3f}\n\n")
         f.write("\n  " + ("{:>8} | " * 8).format("abse", "abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
         f.write("\n")
-        f.write(("&{: 8.3f}  " * 8).format(*mean_errors.tolist()) + "\\\\")
+        f.write(("|{: 8.3f}  " * 8).format(*mean_errors.tolist()) + "|")
         f.write("\n")
-        f.write(("&{: 8.3f}  " * 8).format(*mean_errors_scaling.tolist()) + "\\\\")
+        f.write(("|{: 8.3f}  " * 8).format(*mean_errors_scaling.tolist()) + "|")
         f.write("\n")
 
     print("\n-> Done!")

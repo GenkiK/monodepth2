@@ -48,29 +48,6 @@ def cam_pts2cam_heights(masked_cam_pts: torch.Tensor) -> torch.Tensor:
     return masked_cam_pts @ normal
 
 
-# def cam_pts2cam_height(cam_pts: torch.Tensor, road_masks: torch.Tensor) -> torch.Tensor:
-#     # cam_pts: [bs, h, w, 3]
-#     # road_masks: [bs, h, w]
-#     batch_size = cam_pts.shape[0]
-#     cam_heights = torch.zeros(batch_size, device=cam_pts.device)
-#     # road_maskで切り抜く面積がフレームによって異なるので，バッチで処理できない
-#     # for batch_idx in range(batch_size):
-#     #     A = cam_pts[batch_idx][road_masks[batch_idx] == 1]  # [?, 3]
-#     #     b = -torch.ones((A.shape[0], 1), dtype=torch.float32, device=A.device)
-#     #     A_T = A.T
-#     #     normal = torch.linalg.pinv(A_T @ A) @ A_T @ b
-#     #     normal = normal / torch.linalg.norm(normal)
-#     #     cam_heights[batch_idx] = torch.abs(A @ normal).mean()
-#     # return cam_heights
-#     for batch_idx in range(batch_size):
-#         A = cam_pts[batch_idx][road_masks[batch_idx] == 1]  # [?, 3]
-#         ones = torch.ones((A.shape[0], 1), dtype=torch.float32, device=A.device)
-#         normal = torch.pinverse(A) @ ones
-#         normal = normal / torch.norm(normal)
-#         cam_heights[batch_idx] = (A @ normal).mean()
-#     return cam_heights
-
-
 def readlines(filename):
     """Read all the lines in a text file and return as a list"""
     with open(filename, "r") as f:

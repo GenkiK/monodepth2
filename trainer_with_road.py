@@ -612,40 +612,6 @@ class TrainerWithRoad:
                 else:
                     loss += self.opt.fine_metric_scale_weight * fine_metric_loss / (2**scale)
 
-            # pred_cam_heights, scaled_sum_cam_height_expects, scaled_sum_cam_height_vars = self.compute_cam_heights(
-            #     batch_cam_pts,
-            #     batch_upscaled_depth,
-            #     batch_segms,
-            #     batch_labels,
-            #     batch_n_insts,
-            #     batch_road,
-            #     fy,
-            #     self.prev_mean_cam_height_expects_dict[scale],
-            #     self.prev_mean_cam_height_vars_dict[scale],
-            #     mode,
-            # )
-            # if mode == "train" and scaled_sum_cam_height_expects is not None:
-            #     self.sum_cam_height_expects_dict[scale] += scaled_sum_cam_height_expects
-            #     self.sum_cam_height_vars_dict[scale] += scaled_sum_cam_height_vars
-
-            # if self.epoch > 0:
-            #     fine_metric_loss = (
-            #         F.gaussian_nll_loss(
-            #             input=self.prev_mean_cam_height_expects_dict[0],
-            #             target=pred_cam_heights,
-            #             var=self.prev_mean_cam_height_vars_dict[0],
-            #             eps=0.001,
-            #             reduction="mean",
-            #         )
-            #         / self.opt.batch_size
-            #     )
-            #     loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss
-            #     if self.opt.gradual_fine_metric_scale_weight:
-            #         rate = min(self.epoch / self.opt.increase_limit_epoch, 1)
-            #         loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss / (2**scale)
-            #     else:
-            #         loss += self.opt.fine_metric_scale_weight * fine_metric_loss / (2**scale)
-
             total_loss += loss
             loss_dict[f"loss/{scale}"] = loss.item()
 
@@ -671,12 +637,7 @@ class TrainerWithRoad:
         frame_unscaled_cam_heights = torch.zeros(batch_size, device=batch_cam_pts.device)
         loss = 0.0
         for batch_idx in range(batch_size):
-            # A = batch_cam_pts[batch_idx][batch_road[batch_idx] == 1]  # [?, 3]
-            # ones = torch.ones((A.shape[0], 1), dtype=torch.float32, device=A.device)
-            # normal = torch.pinverse(A) @ ones
-            # normal = normal / torch.norm(normal)
-            # cam_heights = A @ normal
-            cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx][batch_road[batch_idx] == 1]) # [?, 3]
+            cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx][batch_road[batch_idx] == 1])  # [?, 3]
             if self.epoch > 0:
                 loss = loss + F.gaussian_nll_loss(
                     input=self.prev_mean_cam_height_expects_dict[0],  # HACK: スケール0の画像で計算したカメラ高さを使用．スケールごとに変えてもいいかも
@@ -718,55 +679,6 @@ class TrainerWithRoad:
         scaled_sum_cam_height_vars = (frame_scale_var * frame_unscaled_cam_heights**2).nansum()
 
         return loss / batch_size, scaled_sum_cam_height_expects, scaled_sum_cam_height_vars
-
-    # def compute_cam_heights(
-    #     self,
-    #     batch_depth: torch.Tensor,
-    #     batch_segms: torch.Tensor,
-    #     batch_labels: torch.Tensor,
-    #     batch_n_insts: torch.Tensor,
-    #     batch_road: torch.Tensor,
-    #     fy: float,
-    #     mode: str
-    #     # ) -> float | None:
-    # ) -> tuple[torch.Tensor, float, float]:
-    #     bs, _, h, w = batch_depth.shape
-    #     batch_depth = batch_depth.view(bs, h, w)
-
-    #     batch_cam_pts = depths2cam_pts(batch_depth, self.cam_grid)  # [bs, h, w, 3]
-    #     frame_unscaled_cam_heights = cam_pts2cam_height(batch_cam_pts, batch_road)
-
-    # if mode == "val" or batch_n_insts.sum() == 0:
-    #     return frame_unscaled_cam_heights, None, None
-
-    # depth_repeat = batch_depth.repeat_interleave(batch_n_insts, dim=0).detach()  # [sum(batch_n_insts), h, w]
-
-    # segms_flat = batch_segms.view(-1, h, w)
-    # non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
-    # segms_flat = segms_flat[non_padded_channels]  # exclude padded channels
-    # labels_flat = batch_labels.view(-1)[non_padded_channels].long()
-
-    # obj_pix_heights = masks_to_pix_heights(segms_flat)
-    # height_expects = self.height_priors[labels_flat, 0]
-    # height_vars = self.height_priors[labels_flat, 1]
-    # depth_expects = height_expects * fy / obj_pix_heights
-
-    # cam_pts_repeat = batch_cam_pts.repeat_interleave(batch_n_insts, dim=0).detach()  # HACK: detach
-    # masked_cam_pts = cam_pts_repeat * segms_flat.unsqueeze(-1)
-    # masked_cam_pts[masked_cam_pts == 0] = 1000
-    # nearest_pts = argmax_3d(-torch.linalg.norm(masked_cam_pts, dim=3))  # [n_insts * bs, 2]
-    # nearest_depths = depth_repeat[torch.arange(depth_repeat.shape[0]), nearest_pts[:, 0], nearest_pts[:, 1]]  # [n_insts * bs, 2]
-
-    # batch_n_insts_lst = batch_n_insts.tolist()
-    # split_scale_expects = torch.split(depth_expects / nearest_depths, batch_n_insts_lst)
-    # frame_scale_expects = torch.tensor([chunk.mean() for chunk in split_scale_expects], device=depth_expects.device)
-    # split_scale_vars = torch.split(height_vars / (obj_pix_heights * nearest_depths / fy) ** 2, batch_n_insts_lst)
-    # frame_scale_var = torch.tensor([chunk.sum() for chunk in split_scale_vars], device=height_vars.device) / batch_n_insts**2
-
-    # scaled_sum_cam_height_expects = (frame_scale_expects * frame_unscaled_cam_heights.detach()).nansum()
-    # scaled_sum_cam_height_vars = (frame_scale_var * frame_unscaled_cam_heights.detach() ** 2).nansum()
-
-    # return frame_unscaled_cam_heights, scaled_sum_cam_height_expects, scaled_sum_cam_height_vars
 
     def compute_depth_losses(self, input_dict, output_dict, loss_dict):
         """Compute depth metrics, to allow monitoring during training
