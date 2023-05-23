@@ -187,12 +187,9 @@ class MonoDatasetWithSegm(data.Dataset):
 
         if len(line) == 3:
             frame_idx = int(line[1])
-        else:
-            frame_idx = 0
-
-        if len(line) == 3:
             side = line[2]
         else:
+            frame_idx = 0
             side = None
 
         for i in self.adj_frame_idxs:

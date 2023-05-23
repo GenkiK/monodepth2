@@ -26,8 +26,11 @@ from tqdm import tqdm
 
 import datasets
 import networks
-from layers import SSIM, BackprojectDepth, Project3D, compute_depth_errors, disp_to_depth, get_smooth_loss, transformation_from_parameters
-from utils import masks_to_pix_heights, normalize_image, readlines, sec_to_hm_str
+from layers import (SSIM, BackprojectDepth, Project3D, compute_depth_errors,
+                    disp_to_depth, get_smooth_loss,
+                    transformation_from_parameters)
+from utils import (masks_to_pix_heights, normalize_image, readlines,
+                   sec_to_hm_str)
 
 segms_labels_str_set = ("segms", "labels")
 
@@ -286,7 +289,7 @@ class TrainerWithSegm:
             batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
             output_dict, loss_dict = self.process_batch(batch_input_dict)
 
-            self.model_optimizer.zero_grad()
+            self.model_optimizer.zero_grad(set_to_none=True)
             loss_dict["loss"].backward()
             self.model_optimizer.step()
 

@@ -15,10 +15,10 @@ import torch
 
 from kitti_utils import generate_depth_map
 
-from .mono_dataset_with_segm import MonoDatasetWithSegm
+from .mono_dataset_with_road import MonoDatasetWithRoad
 
 
-class KITTIDatasetWithSegm(MonoDatasetWithSegm):
+class KITTIDatasetWithRoad(MonoDatasetWithRoad):
     """Superclass for different types of KITTI dataset loaders"""
 
     def __init__(self, *args, **kwargs):
@@ -64,7 +64,7 @@ class KITTIDatasetWithSegm(MonoDatasetWithSegm):
         raise NotImplementedError
 
 
-class KITTIRAWDatasetWithSegm(KITTIDatasetWithSegm):
+class KITTIRAWDatasetWithRoad(KITTIDatasetWithRoad):
     """KITTI dataset which loads the original velodyne depth maps for ground truth"""
 
     def __init__(self, *args, **kwargs):

@@ -60,6 +60,16 @@ class MonodepthOptions:
         self.parser.add_argument("--width", type=int, help="input image width", default=640)
         self.parser.add_argument("--disparity_smoothness", type=float, help="disparity smoothness weight", default=1e-3)
         self.parser.add_argument("--rough_metric_scale_weight", type=float, help="weight of rough metric scale loss", default=1)
+        self.parser.add_argument("--fine_metric_scale_weight", type=float, help="weight of fine metric scale loss", default=1)
+        self.parser.add_argument(
+            "--gradual_fine_metric_scale_weight", action="store_true", help="whether increasing fine_metric_scale_weight gradually"
+        )
+        self.parser.add_argument(
+            "--increase_limit_epoch",
+            type=int,
+            help="upper limit of epoch for gradual increase when using --gradual_fine_metric_scale_weight",
+            default=20,
+        )
         self.parser.add_argument("--scales", nargs="+", type=int, help="scales used in the loss", default=[0, 1, 2, 3])
         self.parser.add_argument("--min_depth", type=float, help="minimum depth", default=0.1)
         self.parser.add_argument("--max_depth", type=float, help="maximum depth", default=100.0)

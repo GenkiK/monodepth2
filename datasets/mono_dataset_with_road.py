@@ -40,7 +40,14 @@ def color_aug_func(img, aug_params):
     return img
 
 
-class MonoDataset(data.Dataset):
+def load_segms_labels_as_tensor(path: str) -> tuple[np.ndarray, np.ndarray]:
+    npz = np.load(path)
+    segms = torch.from_numpy(npz["segms"].astype(np.uint8))
+    labels = torch.from_numpy(npz["labels"].astype(np.int8))
+    return segms, labels
+
+
+class MonoDatasetWithRoad(data.Dataset):
     """Superclass for monocular dataloaders
 
     Args:
@@ -52,6 +59,7 @@ class MonoDataset(data.Dataset):
         num_scales
         is_train
         img_ext
+        segm_ext
     """
 
     def __init__(
@@ -64,21 +72,27 @@ class MonoDataset(data.Dataset):
         num_scales,
         is_train=False,
         img_ext=".jpg",
+        segm_ext=".npz",
+        segm_dirname="modified_segms_labels_person_car",
     ):
         super().__init__()
 
-        self.data_path = data_path
-        self.filenames = filenames
+        self.data_path = data_path  # ~/workspace/monodepth2/kitti_data
+        self.filenames = filenames  # ['2011_10_03/2011_10_03_drive_0034_sync 1757 r', '2011_09_26/2011_09_26_drive_0061_sync 635 l',...]
         self.height = height
         self.width = width
         self.num_scales = num_scales
+        self.segm_dirname = segm_dirname  # used for get_segm_path() in KITTIRAWDatasetWithSegm
+        # self.interp = Image.ANTIALIAS
 
-        self.adj_frame_idxs = adj_frame_idxs
+        self.adj_frame_idxs = adj_frame_idxs  # default: [0, -1, 1]
 
         self.is_train = is_train
         self.img_ext = img_ext
+        self.segm_ext = segm_ext
 
         self.pil_loader = load_pil
+        self.tensor_segms_labels_loader = load_segms_labels_as_tensor
         self.to_tensor = transforms.ToTensor()
 
         # We need to specify augmentations differently in newer versions of torchvision.
@@ -97,10 +111,13 @@ class MonoDataset(data.Dataset):
 
         img_interp = transforms.InterpolationMode.LANCZOS
         self.resize_func_dict = {}
+        self.segm_resize_func_dict = {}
         for i in range(self.num_scales):
             s = 2**i
             self.resize_func_dict[i] = transforms.Resize((self.height // s, self.width // s), interpolation=img_interp)
-
+            # self.segm_resize_func_dict[i] = transforms.Resize(
+            #     (self.height // s, self.width // s), interpolation=segm_interp
+            # )
         self.load_depth = self.check_depth()
 
     def preprocess(self, input_dict, color_aug):
@@ -110,11 +127,21 @@ class MonoDataset(data.Dataset):
         images in this item. This ensures that all images input to the pose network receive the
         same augmentation.
         """
+        # if not using list(), "dict changed size during iteration" error is thrown.
         for key in list(input_dict):
             if key[0] == "color":
                 name, f_idx, _ = key
                 for scale in range(self.num_scales):
+                    # i-1をresize funcへの入力とすることで徐々にresizeしていってる．
+                    # TODO: このやり方では縮小しすぎてしまうのでは？論文読んで確かめる
                     input_dict[(name, f_idx, scale)] = self.resize_func_dict[scale](input_dict[(name, f_idx, scale - 1)])
+            # elif key[0] == "segms":
+            #     name, _ = key
+            #     for scale in range(self.num_scales):
+            #         # resizeによりsegmが消滅したときの処理を追加
+            #         # segmはスケールする必要がない（手法的に，小さくresizeした画像をinputして出てきた深度出力をupscaleするから）
+            #         # もしmonodepth1を使う(v1_multiscale)なら，segmもresizeする必要が出てくる
+            #         input_dict[(name, scale)] = self.segm_resize_func_dict[scale](input_dict[(name, scale - 1)])
 
         for key in list(input_dict):
             f = input_dict[key]
@@ -171,6 +198,10 @@ class MonoDataset(data.Dataset):
                 input_dict[("color", i, -1)] = self.get_color(scene_name, frame_idx, other_side, do_flip)
             else:
                 input_dict[("color", i, -1)] = self.get_color(scene_name, frame_idx + i, side, do_flip)
+        segms, labels = self.get_segms_labels_tensor(scene_name, frame_idx, side, do_flip)
+        input_dict["road"] = segms[0]
+        input_dict["segms"] = segms[1:]
+        input_dict["labels"] = labels
 
         if do_color_aug:
             aug_params = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
@@ -182,7 +213,6 @@ class MonoDataset(data.Dataset):
         for i in self.adj_frame_idxs:
             del input_dict[("color", i, -1)]
             del input_dict[("color_aug", i, -1)]
-
         # adjusting intrinsics to match each scale in the pyramid
         for scale in range(self.num_scales):
             K = self.K.copy()
@@ -208,6 +238,9 @@ class MonoDataset(data.Dataset):
 
             input_dict["stereo_T"] = torch.from_numpy(stereo_T)
         return input_dict
+
+    def get_segms_labels_tensor(self, folder, frame_idx, side, do_flip):
+        raise NotImplementedError
 
     def get_color(self, folder, frame_idx, side, do_flip):
         raise NotImplementedError

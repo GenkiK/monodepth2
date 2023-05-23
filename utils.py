@@ -15,10 +15,60 @@ import torch
 
 
 def masks_to_pix_heights(masks: torch.Tensor) -> torch.Tensor:
-    mask_idxs = torch.where(masks != 0)
-    return torch.tensor(
-        [mask_idxs[1][mask_idxs[0] == m_idx].max() - mask_idxs[1][mask_idxs[0] == m_idx].min() for m_idx in range(masks.shape[0])]
-    ).to(masks.device)
+    """
+    masks: Size(n_inst, img_h, img_w)
+    """
+    # 画像の行方向に論理和を取ったものの列方向の総和はピクセル高さ
+    return (masks.sum(2) > 0).sum(1)
+
+
+def argmax_3d(arr: torch.Tensor) -> torch.Tensor:
+    width = arr.shape[-1]
+    _, max_idxs = arr.view(arr.shape[0], -1).max(-1)
+    return torch.stack([max_idxs // width, max_idxs % width], -1)
+
+
+def generate_cam_grid(h: int, w: int, invK: torch.Tensor) -> torch.Tensor:
+    x_pix, y_pix = torch.meshgrid(torch.arange(w), torch.arange(h), indexing="xy")
+    pix_grid = torch.stack((x_pix, y_pix, torch.ones((h, w))))  # [3,h,w] ([:,x,y]がpixel x, yにおけるhomogeneous vector)
+    return (invK[:3, :3] @ pix_grid.reshape(3, -1)).reshape(3, h, w)
+
+
+def depths2cam_pts(batch_depth: torch.Tensor, cam_grid: torch.Tensor) -> torch.Tensor:
+    # batch_depth: Size(bs, h, w)
+    # cam_grid: Size(3, h, w)
+    return cam_grid.permute(1, 2, 0).unsqueeze(0) * batch_depth.unsqueeze(-1)  # [bs, h, w, 3]
+
+
+def cam_pts2cam_heights(masked_cam_pts: torch.Tensor) -> torch.Tensor:
+    # masked_cam_pts: [?, 3]
+    ones = torch.ones((masked_cam_pts.shape[0], 1), dtype=torch.float32, device=masked_cam_pts.device)
+    normal = torch.pinverse(masked_cam_pts) @ ones
+    normal = normal / torch.norm(normal)
+    return masked_cam_pts @ normal
+
+
+# def cam_pts2cam_height(cam_pts: torch.Tensor, road_masks: torch.Tensor) -> torch.Tensor:
+#     # cam_pts: [bs, h, w, 3]
+#     # road_masks: [bs, h, w]
+#     batch_size = cam_pts.shape[0]
+#     cam_heights = torch.zeros(batch_size, device=cam_pts.device)
+#     # road_maskで切り抜く面積がフレームによって異なるので，バッチで処理できない
+#     # for batch_idx in range(batch_size):
+#     #     A = cam_pts[batch_idx][road_masks[batch_idx] == 1]  # [?, 3]
+#     #     b = -torch.ones((A.shape[0], 1), dtype=torch.float32, device=A.device)
+#     #     A_T = A.T
+#     #     normal = torch.linalg.pinv(A_T @ A) @ A_T @ b
+#     #     normal = normal / torch.linalg.norm(normal)
+#     #     cam_heights[batch_idx] = torch.abs(A @ normal).mean()
+#     # return cam_heights
+#     for batch_idx in range(batch_size):
+#         A = cam_pts[batch_idx][road_masks[batch_idx] == 1]  # [?, 3]
+#         ones = torch.ones((A.shape[0], 1), dtype=torch.float32, device=A.device)
+#         normal = torch.pinverse(A) @ ones
+#         normal = normal / torch.norm(normal)
+#         cam_heights[batch_idx] = (A @ normal).mean()
+#     return cam_heights
 
 
 def readlines(filename):

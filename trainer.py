@@ -240,7 +240,7 @@ class Trainer:
             batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
             output_dict, loss_dict = self.process_batch(batch_input_dict)
 
-            self.model_optimizer.zero_grad()
+            self.model_optimizer.zero_grad(set_to_none=True)
             loss_dict["loss"].backward()
             self.model_optimizer.step()
 

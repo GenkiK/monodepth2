@@ -75,11 +75,10 @@ def depth2cam_pts(depth: np.ndarray, cam_grid: np.ndarray) -> np.ndarray:
 def cam_pts2cam_height(cam_pts: np.ndarray, road_mask: np.ndarray) -> np.ndarray:
     # cam_pts: [h,w,3]
     A = cam_pts[road_mask == 1]  # [?, 3]
-    b = -np.ones((A.shape[0], 1), dtype=np.float64)
-    A_T = A.T
-    normal = np.linalg.pinv(A_T @ A) @ A_T @ b  # [3, 1]
+    ones = -np.ones((A.shape[0], 1), dtype=np.float64)
+    normal = np.linalg.pinv(A) @ ones  # [3, 1]
     normal /= np.linalg.norm(normal)
-    cam_height = np.abs(A @ normal).mean()
+    cam_height = (A @ normal).mean()
     return cam_height
 
 
