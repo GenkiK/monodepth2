@@ -27,8 +27,11 @@ from tqdm import tqdm
 
 import datasets
 import networks
-from layers import SSIM, BackprojectDepth, Project3D, compute_depth_errors, disp_to_depth, get_smooth_loss, transformation_from_parameters
-from utils import argmax_3d, cam_pts2cam_heights, generate_cam_grid, masks_to_pix_heights, normalize_image, readlines, sec_to_hm_str
+from layers import (SSIM, BackprojectDepth, Project3D, compute_depth_errors,
+                    disp_to_depth, get_smooth_loss,
+                    transformation_from_parameters)
+from utils import (argmax_3d, cam_pts2cam_heights, masks_to_pix_heights,
+                   normalize_image, readlines, sec_to_hm_str)
 
 segms_labels_str_set = ("segms", "labels")
 
@@ -56,7 +59,6 @@ class TrainerWithRoad:
         self.opt = options
 
         if can_resume:
-            # self.load_opts()
             self.log_path = os.path.join(
                 self.opt.root_log_dir,
                 f"{self.opt.width}x{self.opt.height}",
@@ -137,7 +139,11 @@ class TrainerWithRoad:
         self.epoch = 0
 
         if can_resume:
-            weights_dir, self.epoch = self.search_last_epoch()
+            if self.opt.last_epoch_for_resume is None:
+                weights_dir, self.epoch = self.search_last_epoch()
+            else:
+                weights_dir = Path(self.log_path) / "models" / f"weights_{self.opt.last_epoch_for_resume}"
+                self.epoch = self.opt.last_epoch_for_resume
             self.epoch += 1
             self.load_model(weights_dir)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, self.opt.scheduler_step_size, 0.1)
@@ -193,7 +199,7 @@ class TrainerWithRoad:
         self.val_loader = DataLoader(
             val_dataset,
             self.opt.batch_size,
-            True,
+            False,
             num_workers=self.opt.num_workers,
             pin_memory=True,
             drop_last=True,
@@ -230,11 +236,6 @@ class TrainerWithRoad:
         self.scale_init_dict = {scale: 0.0 for scale in self.opt.scales}
         self.sum_cam_height_expects_dict = self.scale_init_dict.copy()
         self.sum_cam_height_vars_dict = self.scale_init_dict.copy()
-        K = torch.tensor([[0.58, 0, 0.5], [0, 1.92, 0.5], [0, 0, 1]], dtype=torch.float32)
-        K[0, :] *= self.opt.width
-        K[1, :] *= self.opt.height
-        invK = torch.linalg.pinv(K)
-        self.cam_grid = generate_cam_grid(self.opt.height, self.opt.width, invK).to(self.device)
 
         if self.opt.annot_height:
             self.height_priors = torch.tensor(
@@ -245,7 +246,7 @@ class TrainerWithRoad:
                 ],
                 dtype=torch.float32,
             )
-            print("\nUsing annotated object height.\n")
+            print("Using annotated object height.\n")
         else:
             self.height_priors = TrainerWithRoad.read_height_priors(self.opt.data_path)
             print("\nUsing calculated object height.\n")
@@ -275,20 +276,19 @@ class TrainerWithRoad:
         lower_is_better = self.standard_metric[:2] == "de" or self.standard_metric == "loss"
         th_best = 1000000 if lower_is_better else -1
 
-        print(f"========= Training has started from {self.epoch}epoch. ========= ")
+        print(f"========= Training has started from {self.epoch} epoch. ========= ")
         for self.epoch in range(self.epoch, self.opt.num_epochs):
             self.n_inst_frames = 0
             self.sum_cam_height_expects_dict = self.scale_init_dict.copy()
             self.sum_cam_height_vars_dict = self.scale_init_dict.copy()
             self.train_epoch()
-            # 0以外のスケールは可視化するためだけに保存する（実際に損失計算に使うのは0だけ）
             val_loss_dict = self.val_epoch()
             val_loss = val_loss_dict[self.standard_metric]
             self.prev_mean_cam_height_expects_dict = {
-                k: sum_cam_height / self.n_inst_frames for k, sum_cam_height in self.sum_cam_height_expects_dict.items()
+                scale: sum_cam_height / self.n_inst_frames for scale, sum_cam_height in self.sum_cam_height_expects_dict.items()
             }
             self.prev_mean_cam_height_vars_dict = {
-                k: sum_cam_height_var / self.n_inst_frames**2 for k, sum_cam_height_var in self.sum_cam_height_vars_dict.items()
+                scale: sum_cam_height_var / self.n_inst_frames**2 for scale, sum_cam_height_var in self.sum_cam_height_vars_dict.items()
             }
             if (lower_is_better and val_loss < th_best) or (not lower_is_better and val_loss > th_best):
                 self.save_model(is_best=True)
@@ -305,7 +305,7 @@ class TrainerWithRoad:
             before_op_time = time.time()
 
             batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
-            output_dict, loss_dict = self.process_batch(batch_input_dict)
+            batch_output_dict, loss_dict = self.process_batch(batch_input_dict)
 
             self.model_optimizer.zero_grad(set_to_none=True)
             loss_dict["loss"].backward()
@@ -321,8 +321,8 @@ class TrainerWithRoad:
                 self.log_time(batch_idx, duration, loss_dict["loss"].cpu().data)
 
                 if "depth_gt" in batch_input_dict:
-                    self.compute_depth_losses(batch_input_dict, output_dict, loss_dict)
-                self.log_train(batch_input_dict, output_dict, loss_dict)
+                    self.compute_depth_losses(batch_input_dict, batch_output_dict, loss_dict)
+                self.log_train(batch_input_dict, batch_output_dict, loss_dict)
             del loss_dict
             torch.cuda.empty_cache()
             self.step += 1
@@ -333,7 +333,6 @@ class TrainerWithRoad:
 
     def process_batch(self, input_dict, mode="train"):
         """Pass a minibatch through the network and generate images and losses"""
-        # input_dict = {key: ipt.to(self.device) for key, ipt in input_dict.items()}
 
         if self.opt.pose_model_type == "shared":
             # If we are using a shared encoder for both depth and pose (as advocated
@@ -434,7 +433,6 @@ class TrainerWithRoad:
             for loss_name in avg_loss_dict:
                 avg_loss_dict[loss_name] /= n_iter
             self.log_val(avg_loss_dict)
-            self.set_train()
             return avg_loss_dict
 
     def generate_images_pred(self, input_dict, output_dict):
@@ -454,7 +452,6 @@ class TrainerWithRoad:
             h = self.opt.height
             w = self.opt.width
             # TODO: [:, :-1, :]の意味
-            # output_dict[("cam_pts", scale)] = cam_points[:, :-1, :].view(-1, 3, h, w)
             output_dict[("cam_pts", scale)] = cam_points[:, :-1, :].view(-1, 3, h, w).permute(0, 2, 3, 1)  # [bs, h, w, 3]
             for adj_frame_idx in self.opt.adj_frame_idxs[1:]:
                 if adj_frame_idx == "s":
@@ -509,9 +506,15 @@ class TrainerWithRoad:
         batch_road: torch.Tensor = input_dict["road"]
         batch_labels: torch.Tensor = input_dict["padded_labels"]
         batch_n_insts: torch.Tensor = input_dict["n_insts"]
+        road_exist_idxs = batch_road.sum((1, 2)) > 0
+        batch_segms = batch_segms[road_exist_idxs]
+        batch_road = batch_road[road_exist_idxs]
+        batch_labels = batch_labels[road_exist_idxs]
+        batch_n_insts = batch_n_insts[road_exist_idxs]
 
         if mode == "train":
-            self.n_inst_frames += (batch_n_insts > 0).sum()
+            # TODO: erodeした場合，batch_n_instsが変わるのでこれを修正する必要がある
+            self.n_inst_frames += (batch_n_insts[road_exist_idxs] > 0).sum()
 
         fy: float = input_dict[("K", source_scale)][0, 1, 1]
         batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
@@ -519,9 +522,9 @@ class TrainerWithRoad:
             loss = 0.0
             reprojection_losses = []
             batch_disp: torch.Tensor = output_dict[("disp", scale)]
-            batch_upscaled_depth: torch.Tensor = output_dict[("depth", scale)]
+            batch_upscaled_depth: torch.Tensor = output_dict[("depth", scale)].squeeze(1)[road_exist_idxs]
             batch_color: torch.Tensor = input_dict[("color", 0, scale)]
-            batch_cam_pts: torch.Tensor = output_dict[("cam_pts", scale)]  # [bs, h, w, 3]
+            batch_cam_pts: torch.Tensor = output_dict[("cam_pts", scale)][road_exist_idxs]  # [bs, h, w, 3]
 
             for adj_frame_idx in self.opt.adj_frame_idxs[1:]:
                 batch_pred = output_dict[("color", adj_frame_idx, scale)]
@@ -575,7 +578,6 @@ class TrainerWithRoad:
             if not self.opt.disable_automasking:
                 output_dict["identity_selection/{}".format(scale)] = (idxs > identity_reprojection_loss.shape[1] - 1).float()
 
-            # loss += to_optimize.mean()
             final_reprojection_loss = to_optimize.mean()
             loss_dict[f"loss/reprojection_{scale}"] = final_reprojection_loss.item()
             loss += final_reprojection_loss
@@ -587,27 +589,28 @@ class TrainerWithRoad:
             loss_dict[f"loss/smoothness_{scale}"] = smooth_loss.item()
             loss += self.opt.disparity_smoothness * smooth_loss / (2**scale)
 
-            # FIXME:  valのときpred_cam_heightsがnanになる？
-            fine_metric_loss, scaled_sum_cam_height_expects, scaled_sum_cam_height_vars = self.compute_cam_heights(
+            fine_metric_loss, unscaled_cam_heights = self.compute_cam_heights(
+                batch_cam_pts,
+                batch_road,
+            )
+            scaled_sum_cam_height_expects, scaled_sum_cam_height_vars = self.scale_cam_heights(
                 batch_cam_pts,
                 batch_upscaled_depth,
                 batch_segms,
                 batch_labels,
                 batch_n_insts,
-                batch_road,
+                unscaled_cam_heights,
                 fy,
-                mode,
             )
+
             if mode == "train" and scaled_sum_cam_height_expects is not None:
                 self.sum_cam_height_expects_dict[scale] += scaled_sum_cam_height_expects
                 self.sum_cam_height_vars_dict[scale] += scaled_sum_cam_height_vars
-            # HACK: 数エポック経ってからこのlossを学習するようにしてもいい
-            # もしそうするなら，最初の方compute_cam_heightsは計算しなくていい
 
             if self.epoch > 0:
                 loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss.item()
                 if self.opt.gradual_fine_metric_scale_weight:
-                    rate = min(self.epoch / self.opt.increase_limit_epoch, 1)
+                    rate = min(self.epoch / self.opt.gradual_limit_epoch, 1)
                     loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss / (2**scale)
                 else:
                     loss += self.opt.fine_metric_scale_weight * fine_metric_loss / (2**scale)
@@ -622,37 +625,41 @@ class TrainerWithRoad:
     def compute_cam_heights(
         self,
         batch_cam_pts: torch.Tensor,  # [bs, h, w, 3]
-        batch_depth: torch.Tensor,
-        batch_segms: torch.Tensor,
-        batch_labels: torch.Tensor,
-        batch_n_insts: torch.Tensor,
         batch_road: torch.Tensor,
-        fy: float,
-        mode: str,
-    ) -> tuple[torch.Tensor, float, float]:
-        bs, _, h, w = batch_depth.shape
-        batch_depth = batch_depth.view(bs, h, w)
-
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
         batch_size = batch_cam_pts.shape[0]
         frame_unscaled_cam_heights = torch.zeros(batch_size, device=batch_cam_pts.device)
         loss = 0.0
         for batch_idx in range(batch_size):
-            cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx][batch_road[batch_idx] == 1])  # [?, 3]
+            cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx], batch_road[batch_idx])  # [?, 3]
             if self.epoch > 0:
                 loss = loss + F.gaussian_nll_loss(
-                    input=self.prev_mean_cam_height_expects_dict[0],  # HACK: スケール0の画像で計算したカメラ高さを使用．スケールごとに変えてもいいかも
+                    input=self.prev_mean_cam_height_expects_dict[0],
                     target=cam_heights,
                     var=self.prev_mean_cam_height_vars_dict[0],
                     eps=0.001,
                     reduction="mean",
                 )
             frame_unscaled_cam_heights[batch_idx] = cam_heights.detach().mean()
+        return loss / batch_size, frame_unscaled_cam_heights
 
-        if mode == "val" or batch_n_insts.sum() == 0:
-            return loss / batch_size, None, None
+    def scale_cam_heights(
+        self,
+        batch_cam_pts: torch.Tensor,  # [bs, h, w, 3]
+        batch_depth: torch.Tensor,
+        batch_segms: torch.Tensor,
+        batch_labels: torch.Tensor,
+        batch_n_insts: torch.Tensor,
+        frame_unscaled_cam_heights: torch.Tensor,
+        fy: float,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+        if batch_n_insts.sum() == 0:
+            return None, None
+
+        _, h, w = batch_depth.shape
 
         depth_repeat = batch_depth.detach().repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
-
+        # TODO: インスタンスに対してerosion処理を追加
         segms_flat = batch_segms.view(-1, h, w)
         non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
         segms_flat = segms_flat[non_padded_channels]  # exclude padded channels
@@ -677,8 +684,7 @@ class TrainerWithRoad:
 
         scaled_sum_cam_height_expects = (frame_scale_expects * frame_unscaled_cam_heights).nansum()
         scaled_sum_cam_height_vars = (frame_scale_var * frame_unscaled_cam_heights**2).nansum()
-
-        return loss / batch_size, scaled_sum_cam_height_expects, scaled_sum_cam_height_vars
+        return scaled_sum_cam_height_expects, scaled_sum_cam_height_vars
 
     def compute_depth_losses(self, input_dict, output_dict, loss_dict):
         """Compute depth metrics, to allow monitoring during training
@@ -686,9 +692,8 @@ class TrainerWithRoad:
         This isn't particularly accurate as it averages over the entire batch,
         so is only used to give an indication of validation performance
         """
-        batch_depth_pred = output_dict[("depth", 0)]
+        batch_depth_pred = output_dict[("depth", 0)].detach()
         batch_depth_pred = torch.clamp(F.interpolate(batch_depth_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
-        batch_depth_pred = batch_depth_pred.detach()
 
         batch_depth_gt = input_dict["depth_gt"]
         batch_mask = batch_depth_gt > 0
@@ -738,7 +743,7 @@ class TrainerWithRoad:
         """Write an event to the tensorboard events file"""
         writer = self.writers["train"]
         for name, loss in loss_dict.items():
-            writer.add_scalar(f"{name}", loss, self.step)
+            writer.add_scalar(name, loss, self.step)
 
         if self.opt.log_image:
             for j in range(min(4, self.opt.batch_size)):  # write a maximum of four images
@@ -752,7 +757,7 @@ class TrainerWithRoad:
                                 self.step,
                             )
 
-                    writer.add_image("disp_{}/{}".format(scale, j), normalize_image(output_dict[("disp", scale)][j]), self.step)
+                    writer.add_image(f"disp_{scale}/{j}", normalize_image(output_dict[("disp", scale)][j]), self.step)
 
                     if self.opt.predictive_mask:
                         for f_idx, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
@@ -829,33 +834,6 @@ class TrainerWithRoad:
         torch.save(self.model_optimizer.state_dict(), optimizer_save_path)
         if is_best:
             torch.save(self.model_optimizer.state_dict(), os.path.join(save_best_folder, "adam.pth"))
-        # scheduler_save_path = os.path.join(save_folder, "scheduler.pth")
-        # torch.save(self.model_lr_scheduler.state_dict(), scheduler_save_path)
-
-    # def load_model(self):
-    #     """Load model(s) from disk"""
-    #     self.opt.load_weights_folder = os.path.expanduser(self.opt.load_weights_folder)
-
-    #     assert os.path.isdir(self.opt.load_weights_folder), "Cannot find folder {}".format(self.opt.load_weights_folder)
-    #     print("loading model from folder {}".format(self.opt.load_weights_folder))
-
-    #     for n in self.opt.models_to_load:
-    #         print("Loading {} weights...".format(n))
-    #         path = os.path.join(self.opt.load_weights_folder, "{}.pth".format(n))
-    #         model_dict = self.models[n].state_dict()
-    #         pretrained_dict = torch.load(path)
-    #         pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-    #         model_dict.update(pretrained_dict)
-    #         self.models[n].load_state_dict(model_dict)
-
-    #     # loading adam state
-    #     optimizer_load_path = os.path.join(self.opt.load_weights_folder, "adam.pth")
-    #     if os.path.isfile(optimizer_load_path):
-    #         print("Loading Adam weights")
-    #         optimizer_dict = torch.load(optimizer_load_path)
-    #         self.model_optimizer.load_state_dict(optimizer_dict)
-    #     else:
-    #         print("Cannot find Adam weights so Adam is randomly initialized")
 
     def search_last_epoch(self) -> tuple[Path, int]:
         root_weights_dir = Path(self.log_path) / "models"
@@ -882,13 +860,19 @@ class TrainerWithRoad:
 
         # load prev_cam_height
         cam_height_expect_path = weights_dir / "cam_height_expect.pkl"
-        print("Loading prev_mean_cam_height_expects_dict")
-        with open(cam_height_expect_path, "rb") as f:
-            self.prev_mean_cam_height_expects_dict = pickle.load(f)
+        if cam_height_expect_path.exists():
+            print("Loading prev_mean_cam_height_expects_dict")
+            with open(cam_height_expect_path, "rb") as f:
+                self.prev_mean_cam_height_expects_dict = pickle.load(f)
+        else:
+            print(f"\n{cam_height_expect_path} does not exists.\n")
         cam_height_var_path = weights_dir / "cam_height_var.pkl"
-        print("Loading prev_mean_cam_height_vars_dict")
-        with open(cam_height_var_path, "rb") as f:
-            self.prev_mean_cam_height_vars_dict = pickle.load(f)
+        if cam_height_var_path.exists():
+            print("Loading prev_mean_cam_height_vars_dict")
+            with open(cam_height_var_path, "rb") as f:
+                self.prev_mean_cam_height_vars_dict = pickle.load(f)
+        else:
+            print(f"\n{cam_height_var_path} does not exists.\n")
 
         # load adam state
         optimizer_load_path = weights_dir / "adam.pth"
@@ -898,12 +882,3 @@ class TrainerWithRoad:
             self.model_optimizer.load_state_dict(optimizer_dict)
         else:
             print("Cannot find Adam weights so Adam is randomly initialized")
-
-        # # load scheduler state
-        # scheduler_load_path = weights_dir.parent / "scheduler.pth"
-        # if scheduler_load_path.exists():
-        #     print("Loading learning rate scheduler weights")
-        #     scheduler_dict = torch.load(scheduler_load_path)
-        #     self.model_lr_scheduler.load_state_dict(scheduler_dict)
-        # else:
-        #     print(f"Cannot find scheduler weights so it is initialized with last_epoch={self.epoch - 1}")

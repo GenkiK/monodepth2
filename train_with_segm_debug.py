@@ -248,7 +248,7 @@ class TrainerWithSegmDebug:
                     [1.5260834, 0.01868551],
                 ]
             )
-            print("\nUsing annotated object height.\n")
+            print("Using annotated object height.\n")
         else:
             self.height_priors = TrainerWithSegmDebug.read_height_priors(self.opt.data_path)
             print("\nUsing calculated object height.\n")
@@ -274,7 +274,7 @@ class TrainerWithSegmDebug:
         self.step = self.epoch * len(self.train_loader)
         self.start_time = time.time()
 
-        print(f"========= Training has started from {self.epoch}epoch. ========= ")
+        print(f"========= Training has started from {self.epoch} epoch. ========= ")
         for self.epoch in range(self.epoch, self.opt.num_epochs):
             self.run_epoch()
             self.val()
@@ -288,7 +288,7 @@ class TrainerWithSegmDebug:
             batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
             _, loss_dict = self.process_batch(batch_input_dict)
 
-            self.model_optimizer.zero_grad()
+            self.model_optimizer.zero_grad(set_to_none=True)
             loss_dict["loss"].backward()
             self.model_optimizer.step()
 
@@ -587,7 +587,7 @@ class TrainerWithSegmDebug:
 
         pred_heights = obj_pix_heights * obj_mean_depths / fy_repeat
         # loss = F.gaussian_nll_loss(input=height_priors[:, 0], target=pred_heights, var=height_priors[:, 1], eps=0.001)
-        loss = F.gaussian_nll_loss(input=height_priors[:, 0], target=pred_heights, var=height_priors[:, 1], reduction='mean') / self.batch_size
+        loss = F.gaussian_nll_loss(input=height_priors[:, 0], target=pred_heights, var=height_priors[:, 1], reduction="mean") / self.batch_size
         return loss
 
     def compute_depth_losses(self, input_dict, output_dict, loss_dict):

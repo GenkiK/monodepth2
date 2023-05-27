@@ -8,7 +8,9 @@ from __future__ import absolute_import, division, print_function
 
 import json
 import os
+import pickle
 import time
+from argparse import Namespace
 from datetime import datetime
 from pathlib import Path
 
@@ -17,17 +19,38 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.nn.utils import rnn
 from torch.utils.data import DataLoader
+from torch.utils.data._utils.collate import default_collate
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import datasets
 import networks
 from layers import SSIM, BackprojectDepth, Project3D, compute_depth_errors, disp_to_depth, get_smooth_loss, transformation_from_parameters
-from utils import normalize_image, readlines, sec_to_hm_str
+from utils import argmax_3d, cam_pts2cam_heights, masks_to_pix_heights, normalize_image, readlines, sec_to_hm_str
+
+segms_labels_str_set = ("segms", "labels")
 
 
-class Trainer:
+def collate_fn(dict_batch):
+    # batch: [{...} x batch_size]
+    ret_dct = {key: default_collate([d[key] for d in dict_batch]) for key in dict_batch[0] if key not in segms_labels_str_set}
+    padded_segms, padded_labels, n_insts = pad_segms_labels([d["segms"] for d in dict_batch], [d["labels"] for d in dict_batch])
+    ret_dct["padded_segms"] = padded_segms
+    ret_dct["padded_labels"] = padded_labels
+    ret_dct["n_insts"] = n_insts
+    return ret_dct
+
+
+def pad_segms_labels(batch_segms, batch_labels):
+    n_insts = torch.tensor([len(item) for item in batch_labels])
+    padded_batch_segms = rnn.pad_sequence(batch_segms, batch_first=True, padding_value=0)
+    padded_batch_labels = rnn.pad_sequence(batch_labels, batch_first=True, padding_value=0)
+    return padded_batch_segms, padded_batch_labels, n_insts
+
+
+class TrainerHybrid:
     def __init__(self, options):
         can_resume = options.resume and options.ckpt_timestamp
         self.opt = options
@@ -39,8 +62,9 @@ class Trainer:
                 f"{self.opt.model_name}{'_' if self.opt.model_name else ''}{self.opt.ckpt_timestamp}",
             )
             if not os.path.exists(self.log_path):
-                raise FileNotFoundError(f"{self.log_path} does not exist, so you cannot resume.")
+                raise FileNotFoundError(f"{self.log_path} does not exist.")
         else:
+            # self.opt = options
             self.log_path = os.path.join(
                 options.root_log_dir,
                 f"{options.width}x{options.height}",
@@ -110,8 +134,13 @@ class Trainer:
 
         self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
         self.epoch = 0
+
         if can_resume:
-            weights_dir, self.epoch = self.search_last_epoch()
+            if self.opt.last_epoch_for_resume is None:
+                weights_dir, self.epoch = self.search_last_epoch()
+            else:
+                weights_dir = Path(self.log_path) / "models" / f"weights_{self.opt.last_epoch_for_resume}"
+                self.epoch = self.opt.last_epoch_for_resume
             self.epoch += 1
             self.load_model(weights_dir)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, self.opt.scheduler_step_size, 0.1)
@@ -122,8 +151,7 @@ class Trainer:
         print("Training is using:\n  ", self.device)
 
         # data
-        datasets_dict = {"kitti": datasets.KITTIRAWDataset, "kitti_odom": datasets.KITTIOdomDataset}
-        self.dataset = datasets_dict[self.opt.dataset]
+        self.dataset = datasets.KITTIRAWDatasetWithRoad
 
         fpath = os.path.join(os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt")
 
@@ -143,6 +171,7 @@ class Trainer:
             self.num_scales,
             is_train=True,
             img_ext=img_ext,
+            segm_dirname=self.opt.segm_dirname,
         )
         self.train_loader = DataLoader(
             train_dataset,
@@ -151,6 +180,7 @@ class Trainer:
             num_workers=self.opt.num_workers,
             pin_memory=True,
             drop_last=True,
+            collate_fn=collate_fn,
         )
         val_dataset = self.dataset(
             self.opt.data_path,
@@ -161,16 +191,17 @@ class Trainer:
             self.num_scales,
             is_train=False,
             img_ext=img_ext,
+            segm_dirname=self.opt.segm_dirname,
         )
         self.val_loader = DataLoader(
             val_dataset,
             self.opt.batch_size,
-            True,
+            False,
             num_workers=self.opt.num_workers,
             pin_memory=True,
             drop_last=True,
+            collate_fn=collate_fn,
         )
-
         self.writers = {}
         for mode in ["train", "val"]:
             self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
@@ -199,7 +230,31 @@ class Trainer:
         print("Using split:\n  ", self.opt.split)
         print("There are {:d} training items and {:d} validation items\n".format(len(train_dataset), len(val_dataset)))
 
+        self.scale_init_dict = {scale: 0.0 for scale in self.opt.scales}
+        self.sum_cam_height_expects_dict = self.scale_init_dict.copy()
+        self.sum_cam_height_vars_dict = self.scale_init_dict.copy()
+
+        if self.opt.annot_height:
+            self.height_priors = torch.tensor(
+                [
+                    [1.747149944305419922e00, 6.863836944103240967e-02],
+                    [np.nan, np.nan],
+                    [1.5260834, 0.01868551],
+                ],
+                dtype=torch.float32,
+            )
+            print("Using annotated object height.\n")
+        else:
+            self.height_priors = TrainerHybrid.read_height_priors(self.opt.data_path)
+            print("\nUsing calculated object height.\n")
+        self.height_priors = self.height_priors.to(self.device)
+
         self.save_opts()
+
+    @staticmethod
+    def read_height_priors(root_dir: str) -> torch.Tensor:
+        path = os.path.join(root_dir, "height_priors.txt")
+        return torch.from_numpy(np.loadtxt(path, delimiter=" ", dtype=np.float32, ndmin=2))
 
     def set_train(self):
         """Convert all models to training mode"""
@@ -220,16 +275,25 @@ class Trainer:
 
         print(f"========= Training has started from {self.epoch} epoch. ========= ")
         for self.epoch in range(self.epoch, self.opt.num_epochs):
-            self.run_epoch()
-            val_loss_dict = self.val()
+            self.n_inst_frames = 0
+            self.sum_cam_height_expects_dict = self.scale_init_dict.copy()
+            self.sum_cam_height_vars_dict = self.scale_init_dict.copy()
+            self.train_epoch()
+            val_loss_dict = self.val_epoch()
             val_loss = val_loss_dict[self.standard_metric]
+            self.prev_mean_cam_height_expects_dict = {
+                scale: sum_cam_height / self.n_inst_frames for scale, sum_cam_height in self.sum_cam_height_expects_dict.items()
+            }
+            self.prev_mean_cam_height_vars_dict = {
+                scale: sum_cam_height_var / self.n_inst_frames**2 for scale, sum_cam_height_var in self.sum_cam_height_vars_dict.items()
+            }
             if (lower_is_better and val_loss < th_best) or (not lower_is_better and val_loss > th_best):
                 self.save_model(is_best=True)
                 th_best = val_loss
             else:
                 self.save_model(is_best=False)
 
-    def run_epoch(self):
+    def train_epoch(self):
         """Run a single epoch of training and validation"""
         print("Training")
         self.set_train()
@@ -238,7 +302,7 @@ class Trainer:
             before_op_time = time.time()
 
             batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
-            output_dict, loss_dict = self.process_batch(batch_input_dict)
+            batch_output_dict, loss_dict = self.process_batch(batch_input_dict)
 
             self.model_optimizer.zero_grad(set_to_none=True)
             loss_dict["loss"].backward()
@@ -254,15 +318,18 @@ class Trainer:
                 self.log_time(batch_idx, duration, loss_dict["loss"].cpu().data)
 
                 if "depth_gt" in batch_input_dict:
-                    self.compute_depth_losses(batch_input_dict, output_dict, loss_dict)
-                self.log_train(batch_input_dict, output_dict, loss_dict)
+                    self.compute_depth_losses(batch_input_dict, batch_output_dict, loss_dict)
+                self.log_train(batch_input_dict, batch_output_dict, loss_dict)
+            del loss_dict
+            torch.cuda.empty_cache()
             self.step += 1
+        if self.epoch > 0:
+            self.log_cam_height()
 
         self.model_lr_scheduler.step()
 
-    def process_batch(self, input_dict):
+    def process_batch(self, input_dict, mode="train"):
         """Pass a minibatch through the network and generate images and losses"""
-        # input_dict = {key: ipt.to(self.device) for key, ipt in input_dict.items()}
 
         if self.opt.pose_model_type == "shared":
             # If we are using a shared encoder for both depth and pose (as advocated
@@ -285,7 +352,7 @@ class Trainer:
             output_dict.update(self.predict_poses(input_dict, features))
 
         self.generate_images_pred(input_dict, output_dict)
-        loss_dict = self.compute_losses(input_dict, output_dict)
+        loss_dict = self.compute_losses(input_dict, output_dict, mode)
 
         return output_dict, loss_dict
 
@@ -343,14 +410,14 @@ class Trainer:
 
         return output_dict
 
-    def val(self):
+    def val_epoch(self):
         """Validate the model on a single minibatch"""
         self.set_eval()
         avg_loss_dict = {}
         with torch.no_grad():
             for batch_input_dict in self.val_loader:
                 batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
-                batch_output_dict, loss_dict = self.process_batch(batch_input_dict)
+                batch_output_dict, loss_dict = self.process_batch(batch_input_dict, mode="val")
                 if "depth_gt" in batch_input_dict:
                     self.compute_depth_losses(batch_input_dict, batch_output_dict, loss_dict)
                 for loss_name in loss_dict:
@@ -363,7 +430,6 @@ class Trainer:
             for loss_name in avg_loss_dict:
                 avg_loss_dict[loss_name] /= n_iter
             self.log_val(avg_loss_dict)
-            self.set_train()
             return avg_loss_dict
 
     def generate_images_pred(self, input_dict, output_dict):
@@ -372,16 +438,18 @@ class Trainer:
         """
         for scale in self.opt.scales:
             disp = output_dict[("disp", scale)]
-            if self.opt.v1_multiscale:
-                source_scale = scale
-            else:
-                disp = F.interpolate(disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
-                source_scale = 0
+            disp = F.interpolate(disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
+            source_scale = 0
 
             _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
 
             output_dict[("depth", scale)] = depth
 
+            cam_points = self.backproject_depth[source_scale](depth, input_dict[("inv_K", source_scale)])
+            h = self.opt.height
+            w = self.opt.width
+            # TODO: [:, :-1, :]の意味
+            output_dict[("cam_pts", scale)] = cam_points[:, :-1, :].view(-1, 3, h, w).permute(0, 2, 3, 1)  # [bs, h, w, 3]
             for adj_frame_idx in self.opt.adj_frame_idxs[1:]:
                 if adj_frame_idx == "s":
                     T = input_dict["stereo_T"]
@@ -398,7 +466,6 @@ class Trainer:
 
                     T = transformation_from_parameters(axisangle[:, 0], translation[:, 0] * mean_inv_depth[:, 0], adj_frame_idx < 0)
 
-                cam_points = self.backproject_depth[source_scale](depth, input_dict[("inv_K", source_scale)])
                 pix_coords = self.project_3d[source_scale](cam_points, input_dict[("K", source_scale)], T)
 
                 output_dict[("sample", adj_frame_idx, scale)] = pix_coords
@@ -426,34 +493,43 @@ class Trainer:
 
         return reprojection_loss
 
-    def compute_losses(self, input_dict, output_dict):
+    def compute_losses(self, input_dict, output_dict, mode):
         """Compute the reprojection and smoothness losses for a minibatch"""
+        source_scale = 0
         loss_dict = {}
         total_loss = 0
 
+        batch_segms: torch.Tensor = input_dict["padded_segms"]
+        batch_road: torch.Tensor = input_dict["road"]
+        batch_labels: torch.Tensor = input_dict["padded_labels"]
+        batch_n_insts: torch.Tensor = input_dict["n_insts"]
+        batch_road_appear_idxs = batch_road.sum((1, 2)) > 0
+        batch_road = batch_road[batch_road_appear_idxs]
+
+        if mode == "train":
+            # TODO: erodeした場合，batch_n_instsが変わるのでこれを修正する必要がある
+            self.n_inst_frames += (batch_n_insts[batch_road_appear_idxs] > 0).sum()
+
+        fy: float = input_dict[("K", source_scale)][0, 1, 1]
+        batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
         for scale in self.opt.scales:
-            loss = 0
+            loss = 0.0
             reprojection_losses = []
-
-            if self.opt.v1_multiscale:
-                source_scale = scale
-            else:
-                source_scale = 0
-
             batch_disp: torch.Tensor = output_dict[("disp", scale)]
+            batch_upscaled_depth: torch.Tensor = output_dict[("depth", scale)].squeeze(1)
             batch_color: torch.Tensor = input_dict[("color", 0, scale)]
-            batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
+            batch_cam_pts: torch.Tensor = output_dict[("cam_pts", scale)][batch_road_appear_idxs]  # [bs, h, w, 3]
 
-            for frame_idx in self.opt.adj_frame_idxs[1:]:
-                batch_pred = output_dict[("color", frame_idx, scale)]
+            for adj_frame_idx in self.opt.adj_frame_idxs[1:]:
+                batch_pred = output_dict[("color", adj_frame_idx, scale)]
                 reprojection_losses.append(self.compute_reprojection_loss(batch_pred, batch_target))
 
             reprojection_losses = torch.cat(reprojection_losses, 1)
 
             if not self.opt.disable_automasking:
                 identity_reprojection_losses = []
-                for frame_idx in self.opt.adj_frame_idxs[1:]:
-                    batch_pred = input_dict[("color", frame_idx, source_scale)]
+                for adj_frame_idx in self.opt.adj_frame_idxs[1:]:
+                    batch_pred = input_dict[("color", adj_frame_idx, source_scale)]
                     identity_reprojection_losses.append(self.compute_reprojection_loss(batch_pred, batch_target))
 
                 identity_reprojection_losses = torch.cat(identity_reprojection_losses, 1)
@@ -467,8 +543,7 @@ class Trainer:
             elif self.opt.predictive_mask:
                 # use the predicted mask
                 mask = output_dict["predictive_mask"]["disp", scale]
-                if not self.opt.v1_multiscale:
-                    mask = F.interpolate(mask, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
+                mask = F.interpolate(mask, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
 
                 reprojection_losses *= mask
 
@@ -497,23 +572,165 @@ class Trainer:
             if not self.opt.disable_automasking:
                 output_dict["identity_selection/{}".format(scale)] = (idxs > identity_reprojection_loss.shape[1] - 1).float()
 
-            # loss += to_optimize.mean()
             final_reprojection_loss = to_optimize.mean()
-            loss_dict[f"loss/reprojection_{scale}"] = final_reprojection_loss
+            loss_dict[f"loss/reprojection_{scale}"] = final_reprojection_loss.item()
             loss += final_reprojection_loss
 
             mean_disp = batch_disp.mean(2, True).mean(3, True)
             norm_disp = batch_disp / (mean_disp + 1e-7)
             smooth_loss = get_smooth_loss(norm_disp, batch_color)
 
-            loss_dict[f"loss/smoothness_{scale}"] = smooth_loss
+            loss_dict[f"loss/smoothness_{scale}"] = smooth_loss.item()
             loss += self.opt.disparity_smoothness * smooth_loss / (2**scale)
+
+            depth_repeat, segms_flat, obj_pix_heights, obj_height_expects, obj_height_vars = self.make_flats(
+                batch_upscaled_depth,
+                batch_segms,
+                batch_labels,
+                batch_n_insts,
+            )
+            n_inst_appear_frames = (batch_n_insts > 0).sum()
+            rough_metric_loss = self.compute_rough_metric_loss(
+                depth_repeat,
+                segms_flat,
+                obj_pix_heights,
+                obj_height_expects,
+                obj_height_vars,
+                fy,
+                n_inst_appear_frames,
+            )
+            loss_dict[f"loss/rough_metric_{scale}"] = rough_metric_loss.item()
+            if self.opt.gradual_metric_scale_weight:
+                rate = max(1 - self.epoch / self.opt.gradual_limit_epoch, 0)
+                loss += self.opt.rough_metric_scale_weight * rate * rough_metric_loss / (2**scale)
+            else:
+                loss += self.opt.rough_metric_scale_weight * rough_metric_loss / (2**scale)
+
+            fine_metric_loss, unscaled_cam_heights = self.compute_cam_heights(
+                batch_cam_pts,
+                batch_road,
+            )
+            flat_road_appear_idxs = batch_road_appear_idxs.repeat_interleave(batch_n_insts, dim=0)
+            scaled_sum_cam_height_expects, scaled_sum_cam_height_vars = self.scale_cam_heights(
+                batch_cam_pts,
+                depth_repeat[flat_road_appear_idxs],
+                segms_flat[flat_road_appear_idxs],
+                obj_pix_heights[flat_road_appear_idxs],
+                obj_height_expects[flat_road_appear_idxs],
+                obj_height_vars[flat_road_appear_idxs],
+                batch_n_insts[batch_road_appear_idxs],
+                unscaled_cam_heights,
+                fy,
+            )
+
+            if mode == "train" and scaled_sum_cam_height_expects is not None:
+                self.sum_cam_height_expects_dict[scale] += scaled_sum_cam_height_expects
+                self.sum_cam_height_vars_dict[scale] += scaled_sum_cam_height_vars
+
+            if self.epoch > 0:
+                loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss.item()
+                if self.opt.gradual_fine_metric_scale_weight:
+                    rate = min(self.epoch / self.opt.gradual_limit_epoch, 1)
+                    loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss / (2**scale)
+                else:
+                    loss += self.opt.fine_metric_scale_weight * fine_metric_loss / (2**scale)
+
             total_loss += loss
-            loss_dict[f"loss/{scale}"] = loss
+            loss_dict[f"loss/{scale}"] = loss.item()
 
         total_loss /= self.num_scales
         loss_dict["loss"] = total_loss
         return loss_dict
+
+    def compute_cam_heights(
+        self,
+        batch_cam_pts: torch.Tensor,  # [bs, h, w, 3]
+        batch_road: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+        bs = batch_cam_pts.shape[0]
+        frame_unscaled_cam_heights = torch.zeros(bs, device=batch_cam_pts.device)
+        loss = 0.0
+        for batch_idx in range(bs):
+            cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx], batch_road[batch_idx])  # [?, 3]
+            if self.epoch > 0:
+                loss = loss + F.gaussian_nll_loss(
+                    input=self.prev_mean_cam_height_expects_dict[0],
+                    target=cam_heights,
+                    var=self.prev_mean_cam_height_vars_dict[0],
+                    eps=0.001,
+                    reduction="mean",
+                )
+            frame_unscaled_cam_heights[batch_idx] = cam_heights.detach().mean()
+        return loss / bs, frame_unscaled_cam_heights
+
+    def scale_cam_heights(
+        self,
+        batch_cam_pts: torch.Tensor,  # [bs, h, w, 3]
+        depth_repeat: torch.Tensor,
+        segms_flat: torch.Tensor,
+        obj_pix_heights: torch.Tensor,
+        obj_height_expects: torch.Tensor,
+        obj_height_vars: torch.Tensor,
+        batch_n_insts: torch.Tensor,
+        frame_unscaled_cam_heights: torch.Tensor,
+        fy: float,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+        # TODO: インスタンスに対してerosion処理を追加
+        depth_expects = obj_height_expects * fy / obj_pix_heights
+        cam_pts_repeat = batch_cam_pts.detach().repeat_interleave(batch_n_insts, dim=0)
+        masked_cam_pts = cam_pts_repeat * segms_flat.unsqueeze(-1)
+        masked_cam_pts[masked_cam_pts == 0] = 1000
+        nearest_pts = argmax_3d(-torch.linalg.norm(masked_cam_pts, dim=3))  # [n_insts * bs, 2]
+        nearest_depths = depth_repeat.detach()[torch.arange(depth_repeat.shape[0]), nearest_pts[:, 0], nearest_pts[:, 1]]  # [n_insts * bs, 2]
+
+        batch_n_insts_lst = batch_n_insts.tolist()
+        split_scale_expects = torch.split(depth_expects / nearest_depths, batch_n_insts_lst)
+        frame_scale_expects = torch.tensor([chunk.mean() for chunk in split_scale_expects], device=depth_expects.device)
+        split_scale_vars = torch.split(obj_height_vars / (obj_pix_heights * nearest_depths / fy) ** 2, batch_n_insts_lst)
+        frame_scale_var = torch.tensor([chunk.sum() for chunk in split_scale_vars], device=obj_height_vars.device) / batch_n_insts**2
+
+        scaled_sum_cam_height_expects = (frame_scale_expects * frame_unscaled_cam_heights).nansum()
+        scaled_sum_cam_height_vars = (frame_scale_var * frame_unscaled_cam_heights**2).nansum()
+        return scaled_sum_cam_height_expects, scaled_sum_cam_height_vars
+
+    def compute_rough_metric_loss(
+        self,
+        depth_repeat: torch.Tensor,
+        segms_flat: torch.Tensor,
+        obj_pix_heights: torch.Tensor,
+        obj_height_expects: torch.Tensor,
+        obj_height_vars: torch.Tensor,
+        fy: float,
+        n_inst_appear_frames: int,
+    ) -> torch.Tensor | None:
+        # FIXME: 入力されたdepth, segms, labels, n_instsはroad.sum()==0に対応するものが入ってない．これを含めるように修正
+        obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
+        pred_heights = obj_pix_heights * obj_mean_depths / fy
+        loss = F.gaussian_nll_loss(input=obj_height_expects, target=pred_heights, var=obj_height_vars, reduction="mean") / n_inst_appear_frames
+        return loss
+
+    def make_flats(
+        self,
+        batch_depth: torch.Tensor,
+        batch_segms: torch.Tensor,
+        batch_labels: torch.Tensor,
+        batch_n_insts: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | tuple[None, None, None, None, None]:
+        if batch_n_insts.sum() == 0:
+            return None, None, None, None, None
+
+        _, h, w = batch_depth.shape
+        # HACK: depth_repeatはdetachしてないことに注意（scale_cam_height計算時にはdetachしておく必要あり）
+        depth_repeat = batch_depth.repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
+        segms_flat = batch_segms.view(-1, h, w)
+        non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
+        segms_flat = segms_flat[non_padded_channels]  # exclude padded channels
+        labels_flat = batch_labels.view(-1)[non_padded_channels].long()
+
+        obj_pix_heights = masks_to_pix_heights(segms_flat)
+        obj_height_expects = self.height_priors[labels_flat, 0]
+        obj_height_vars = self.height_priors[labels_flat, 1]
+        return depth_repeat, segms_flat, obj_pix_heights, obj_height_expects, obj_height_vars
 
     def compute_depth_losses(self, input_dict, output_dict, loss_dict):
         """Compute depth metrics, to allow monitoring during training
@@ -521,9 +738,8 @@ class Trainer:
         This isn't particularly accurate as it averages over the entire batch,
         so is only used to give an indication of validation performance
         """
-        batch_depth_pred = output_dict[("depth", 0)]
+        batch_depth_pred = output_dict[("depth", 0)].detach()
         batch_depth_pred = torch.clamp(F.interpolate(batch_depth_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
-        batch_depth_pred = batch_depth_pred.detach()
 
         batch_depth_gt = input_dict["depth_gt"]
         batch_mask = batch_depth_gt > 0
@@ -562,11 +778,18 @@ class Trainer:
             )
         )
 
+    def log_cam_height(self):
+        writer = self.writers["train"]
+        for scale in self.opt.scales:
+            writer.add_scalar(f"cam_height_expect_{scale}", self.prev_mean_cam_height_expects_dict[scale], self.step)
+            writer.add_scalar(f"cam_height_var_{scale}", self.prev_mean_cam_height_vars_dict[scale], self.step)
+        writer.add_scalar("n_inst_frames", self.n_inst_frames, self.step)
+
     def log_train(self, input_dict, output_dict, loss_dict):
         """Write an event to the tensorboard events file"""
         writer = self.writers["train"]
         for name, loss in loss_dict.items():
-            writer.add_scalar(f"{name}", loss, self.step)
+            writer.add_scalar(name, loss, self.step)
 
         if self.opt.log_image:
             for j in range(min(4, self.opt.batch_size)):  # write a maximum of four images
@@ -580,7 +803,7 @@ class Trainer:
                                 self.step,
                             )
 
-                    writer.add_image("disp_{}/{}".format(scale, j), normalize_image(output_dict[("disp", scale)][j]), self.step)
+                    writer.add_image(f"disp_{scale}/{j}", normalize_image(output_dict[("disp", scale)][j]), self.step)
 
                     if self.opt.predictive_mask:
                         for f_idx, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
@@ -612,6 +835,17 @@ class Trainer:
         with open(os.path.join(models_dir, "opt.json"), "w") as f:
             json.dump(to_save, f, indent=2)
 
+    def load_opts(self):
+        json_path = os.path.join(self.log_path, "models", "opt.json")
+        try:
+            with open(json_path, "r") as f:
+                self.opt = Namespace()
+                for k, v in json.load(f):
+                    setattr(self.opt, k, v)
+                print("TODO: namespaceがきちんと読み込まれているかを確認")
+        except FileNotFoundError:
+            print(f"FileNotFoundError: option json file path {self.log_path} does not exist.")
+
     def save_model(self, is_best=False):
         """Save model weights to disk"""
         if is_best:
@@ -634,10 +868,27 @@ class Trainer:
             if is_best:
                 torch.save(to_save, os.path.join(save_best_folder, f"{model_name}.pth"))
 
+        cam_height_expect_path = os.path.join(save_folder, "cam_height_expect.pkl")
+        with open(cam_height_expect_path, "wb") as f:
+            pickle.dump(self.prev_mean_cam_height_expects_dict, f, pickle.HIGHEST_PROTOCOL)
+
+        cam_height_var_path = os.path.join(save_folder, "cam_height_var.pkl")
+        with open(cam_height_var_path, "wb") as f:
+            pickle.dump(self.prev_mean_cam_height_vars_dict, f, pickle.HIGHEST_PROTOCOL)
+
         optimizer_save_path = os.path.join(save_folder, "adam.pth")
         torch.save(self.model_optimizer.state_dict(), optimizer_save_path)
         if is_best:
             torch.save(self.model_optimizer.state_dict(), os.path.join(save_best_folder, "adam.pth"))
+
+    def search_last_epoch(self) -> tuple[Path, int]:
+        root_weights_dir = Path(self.log_path) / "models"
+        last_epoch = -1
+        for weights_dir in root_weights_dir.glob("weights_*"):
+            epoch = int(weights_dir.name[8:])
+            if epoch > last_epoch:
+                last_epoch = epoch
+        return root_weights_dir / f"weights_{last_epoch}", last_epoch
 
     def load_model(self, weights_dir: Path):
         """Load model(s) from disk"""
@@ -645,7 +896,7 @@ class Trainer:
         print(f"loading model from folder {weights_dir}")
 
         for model_name in self.opt.models_to_load:
-            print("Loading {} weights...".format(model_name))
+            print(f"Loading {model_name} weights...")
             path = weights_dir / f"{model_name}.pth"
             model_dict = self.models[model_name].state_dict()
             pretrained_dict = torch.load(path)
@@ -653,7 +904,23 @@ class Trainer:
             model_dict.update(pretrained_dict)
             self.models[model_name].load_state_dict(model_dict)
 
-        # loading adam state
+        # load prev_cam_height
+        cam_height_expect_path = weights_dir / "cam_height_expect.pkl"
+        if cam_height_expect_path.exists():
+            print("Loading prev_mean_cam_height_expects_dict")
+            with open(cam_height_expect_path, "rb") as f:
+                self.prev_mean_cam_height_expects_dict = pickle.load(f)
+        else:
+            print(f"\n{cam_height_expect_path} does not exists.\n")
+        cam_height_var_path = weights_dir / "cam_height_var.pkl"
+        if cam_height_var_path.exists():
+            print("Loading prev_mean_cam_height_vars_dict")
+            with open(cam_height_var_path, "rb") as f:
+                self.prev_mean_cam_height_vars_dict = pickle.load(f)
+        else:
+            print(f"\n{cam_height_var_path} does not exists.\n")
+
+        # load adam state
         optimizer_load_path = weights_dir / "adam.pth"
         if optimizer_load_path.exists():
             print("Loading Adam weights")

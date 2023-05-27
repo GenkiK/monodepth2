@@ -12,6 +12,7 @@ import urllib
 import zipfile
 
 import torch
+from torch.nn import functional as F
 
 
 def masks_to_pix_heights(masks: torch.Tensor) -> torch.Tensor:
@@ -40,12 +41,49 @@ def depths2cam_pts(batch_depth: torch.Tensor, cam_grid: torch.Tensor) -> torch.T
     return cam_grid.permute(1, 2, 0).unsqueeze(0) * batch_depth.unsqueeze(-1)  # [bs, h, w, 3]
 
 
-def cam_pts2cam_heights(masked_cam_pts: torch.Tensor) -> torch.Tensor:
-    # masked_cam_pts: [?, 3]
-    ones = torch.ones((masked_cam_pts.shape[0], 1), dtype=torch.float32, device=masked_cam_pts.device)
-    normal = torch.pinverse(masked_cam_pts) @ ones
-    normal = normal / torch.norm(normal)
-    return masked_cam_pts @ normal
+def cam_pts2cam_heights(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tensor:
+    A = cam_pts[road_mask == 1]
+    ones = torch.ones((A.shape[0], 1), dtype=torch.float32, device=A.device)
+    A_T = A.T
+    normal = torch.linalg.pinv(A_T @ A) @ A_T @ ones
+    normal = normal / torch.linalg.norm(normal)
+    return A @ normal
+
+
+# def cam_pts2cam_heights(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tensor:
+#     # masked_cam_pts: [?, 3]
+#     road_pts = cam_pts[road_mask == 1]
+#     ones = torch.ones((road_pts.shape[0], 1), dtype=torch.float32, device=road_pts.device)
+#     breakpoint()
+#     normal = torch.linalg.pinv(road_pts) @ ones
+#     # FIXME: LinalgPinvBackward0. No forward pass information availableとなる．
+#     # 上のコメントアウトしたコードなら動くが，その場合pinv部分の勾配が伝播しておらず後ろの @ A_T部分の勾配だけ伝わっている可能性がある
+#     # TODO: ↑これを確認  torch.autograd.gradcheck(lambda a, b: torch.linalg.pinv(a @ b.t()), [x, y])
+#     normal = normal / torch.linalg.norm(normal)
+#     return road_pts @ normal
+
+
+# def cam_pts2cam_heights(masked_cam_pts: torch.Tensor) -> torch.Tensor:
+#     # masked_cam_pts: [?, 3]
+#     ones = torch.ones((masked_cam_pts.shape[0], 1), dtype=torch.float32, device=masked_cam_pts.device)
+#     normal = torch.pinverse(masked_cam_pts) @ ones
+#     normal = normal / torch.norm(normal)
+#     return masked_cam_pts @ normal
+
+
+def erode(batch_segms: torch.Tensor, kernel_size: int) -> torch.Tensor:
+    eroded_segms = -F.max_pool2d(
+        -batch_segms.float(),
+        kernel_size=kernel_size,
+        stride=1,
+        padding=[kernel_size // 2, kernel_size // 2],
+    ).to(torch.uint8)
+    return eroded_segms
+
+
+# def erode(segms: torch.Tensor, kernel_size: int) -> torch.Tensor:
+#     eroded_segms = -F.max_pool2d(-segms.float(), kernel_size=kernel_size, stride=1, padding=[kernel_size // 2, kernel_size // 2]).to(torch.uint8)
+#     return eroded_segms
 
 
 def readlines(filename):

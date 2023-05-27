@@ -36,6 +36,9 @@ From: nvidia/cuda:11.7.0-cudnn8-runtime-ubuntu18.04
     pip --no-cache-dir install scikit-learn
     pip --no-cache-dir install pykitti
 
+    # for erosion
+    pip --no-cache-dir install kornia
+
 %environment
     # pip install --user でインストールしたものを使わない
     export PYTHONNOUSERSITE=1

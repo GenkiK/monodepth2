@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 
 # FIXME: dispはsoftmaxの結果出力されるもの((0, 1)の範囲)．故にscaled_dispの値も制限される．この範囲値の実際との乖離値が大きいと，実スケールを直接推定する場合にはdispの値が(0.3,0.7)の範囲とかみたいに，すごい狭い範囲ばかりが最適解となり推定が難しくなる可能性が出てくる．
-def disp_to_depth(disp, min_depth, max_depth):
+def disp_to_depth(disp, min_depth=0.1, max_depth=100):
     """Convert network's sigmoid output into depth prediction
     The formula for this conversion is given in the 'additional considerations'
     section of the paper.

@@ -15,12 +15,14 @@ file_dir = os.path.dirname(__file__)  # the directory that options.py resides in
 class MonodepthOptions:
     def __init__(self):
         self.parser = argparse.ArgumentParser(description="Monodepthv2 options")
+        self.parser.add_argument("--local", action="store_true", help="whether training on local GPU or on server")
 
         # PATHS
         self.parser.add_argument("--data_path", type=str, help="path to the training data", default=os.path.join(file_dir, "kitti_data"))
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "logs"))
 
         # TRAINING options
+        self.parser.add_argument("--kernel_size", help="kernel size for erosion", type=int, default=5)
         self.parser.add_argument("--random_seed", help="random seed", type=int)
         self.parser.add_argument("--annot_height", action="store_true", help="whether using KITTI height labels")
         self.parser.add_argument(
@@ -39,6 +41,7 @@ class MonodepthOptions:
         )
         self.parser.add_argument("--resume", help="whether resuming training", action="store_true")
         self.parser.add_argument("--ckpt_timestamp", type=str, help="this arg is valid only when specifying --resume")
+        self.parser.add_argument("--last_epoch_for_resume", type=int, help="the last epoch number for resuming training")
         self.parser.add_argument("--model_name", type=str, help="the name of the folder to save the model in", default="")
         self.parser.add_argument(
             "--split",
@@ -65,7 +68,7 @@ class MonodepthOptions:
             "--gradual_fine_metric_scale_weight", action="store_true", help="whether increasing fine_metric_scale_weight gradually"
         )
         self.parser.add_argument(
-            "--increase_limit_epoch",
+            "--gradual_limit_epoch",
             type=int,
             help="upper limit of epoch for gradual increase when using --gradual_fine_metric_scale_weight",
             default=20,

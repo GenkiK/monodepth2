@@ -52,9 +52,7 @@ class KITTIDatasetWithRoad(MonoDatasetWithRoad):
     def get_segms_labels_tensor(self, folder, frame_idx, side, do_flip):
         segms, labels = self.tensor_segms_labels_loader(self.get_segm_path(folder, frame_idx, side))
         if do_flip:
-            # return torch.flip(segms, dims=(2,)), labels
-            # compressedを読み込む場合
-            return torch.flip(segms, dims=(1,)), labels
+            return torch.flip(segms, dims=(2,)), labels
         return segms, labels
 
     def get_image_path(self, folder, frame_idx, side):
