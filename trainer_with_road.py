@@ -27,11 +27,8 @@ from tqdm import tqdm
 
 import datasets
 import networks
-from layers import (SSIM, BackprojectDepth, Project3D, compute_depth_errors,
-                    disp_to_depth, get_smooth_loss,
-                    transformation_from_parameters)
-from utils import (argmax_3d, cam_pts2cam_heights, masks_to_pix_heights,
-                   normalize_image, readlines, sec_to_hm_str)
+from layers import SSIM, BackprojectDepth, Project3D, compute_depth_errors, disp_to_depth, get_smooth_loss, transformation_from_parameters
+from utils import argmax_3d, cam_pts2cam_heights, masks_to_pix_heights, normalize_image, readlines, sec_to_hm_str
 
 segms_labels_str_set = ("segms", "labels")
 
@@ -67,7 +64,6 @@ class TrainerWithRoad:
             if not os.path.exists(self.log_path):
                 raise FileNotFoundError(f"{self.log_path} does not exist.")
         else:
-            # self.opt = options
             self.log_path = os.path.join(
                 options.root_log_dir,
                 f"{options.width}x{options.height}",
@@ -506,15 +502,15 @@ class TrainerWithRoad:
         batch_road: torch.Tensor = input_dict["road"]
         batch_labels: torch.Tensor = input_dict["padded_labels"]
         batch_n_insts: torch.Tensor = input_dict["n_insts"]
-        road_exist_idxs = batch_road.sum((1, 2)) > 0
-        batch_segms = batch_segms[road_exist_idxs]
-        batch_road = batch_road[road_exist_idxs]
-        batch_labels = batch_labels[road_exist_idxs]
-        batch_n_insts = batch_n_insts[road_exist_idxs]
+        road_appear_idxs = batch_road.sum((1, 2)) > 0
+        batch_segms = batch_segms[road_appear_idxs]
+        batch_road = batch_road[road_appear_idxs]
+        batch_labels = batch_labels[road_appear_idxs]
+        batch_n_insts = batch_n_insts[road_appear_idxs]
 
         if mode == "train":
             # TODO: erodeした場合，batch_n_instsが変わるのでこれを修正する必要がある
-            self.n_inst_frames += (batch_n_insts[road_exist_idxs] > 0).sum()
+            self.n_inst_frames += (batch_n_insts > 0).sum()
 
         fy: float = input_dict[("K", source_scale)][0, 1, 1]
         batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
@@ -522,9 +518,9 @@ class TrainerWithRoad:
             loss = 0.0
             reprojection_losses = []
             batch_disp: torch.Tensor = output_dict[("disp", scale)]
-            batch_upscaled_depth: torch.Tensor = output_dict[("depth", scale)].squeeze(1)[road_exist_idxs]
+            batch_upscaled_depth: torch.Tensor = output_dict[("depth", scale)].squeeze(1)[road_appear_idxs]
             batch_color: torch.Tensor = input_dict[("color", 0, scale)]
-            batch_cam_pts: torch.Tensor = output_dict[("cam_pts", scale)][road_exist_idxs]  # [bs, h, w, 3]
+            batch_cam_pts: torch.Tensor = output_dict[("cam_pts", scale)][road_appear_idxs]  # [bs, h, w, 3]
 
             for adj_frame_idx in self.opt.adj_frame_idxs[1:]:
                 batch_pred = output_dict[("color", adj_frame_idx, scale)]
@@ -609,7 +605,7 @@ class TrainerWithRoad:
 
             if self.epoch > 0:
                 loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss.item()
-                if self.opt.gradual_fine_metric_scale_weight:
+                if self.opt.gradual_metric_scale_weight:
                     rate = min(self.epoch / self.opt.gradual_limit_epoch, 1)
                     loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss / (2**scale)
                 else:
@@ -633,13 +629,17 @@ class TrainerWithRoad:
         for batch_idx in range(batch_size):
             cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx], batch_road[batch_idx])  # [?, 3]
             if self.epoch > 0:
-                loss = loss + F.gaussian_nll_loss(
-                    input=self.prev_mean_cam_height_expects_dict[0],
-                    target=cam_heights,
-                    var=self.prev_mean_cam_height_vars_dict[0],
-                    eps=0.001,
-                    reduction="mean",
-                )
+                match self.opt.cam_height_loss_func:
+                    case "gaussian_nll_loss":
+                        loss = loss + F.gaussian_nll_loss(
+                            input=self.prev_mean_cam_height_expects_dict[0],
+                            target=cam_heights,
+                            var=self.prev_mean_cam_height_vars_dict[0],
+                            eps=0.001,
+                            reduction="mean",
+                        )
+                    case "abs":
+                        loss = loss + torch.abs(self.prev_mean_cam_height_expects_dict[0] - cam_heights).mean()
             frame_unscaled_cam_heights[batch_idx] = cam_heights.detach().mean()
         return loss / batch_size, frame_unscaled_cam_heights
 

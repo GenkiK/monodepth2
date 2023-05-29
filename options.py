@@ -22,6 +22,7 @@ class MonodepthOptions:
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "logs"))
 
         # TRAINING options
+        self.parser.add_argument("--cam_height_loss_func", type=str, choices=["gaussian_nll_loss", "abs"], default="gaussian_nll_loss")
         self.parser.add_argument("--kernel_size", help="kernel size for erosion", type=int, default=5)
         self.parser.add_argument("--random_seed", help="random seed", type=int)
         self.parser.add_argument("--annot_height", action="store_true", help="whether using KITTI height labels")
@@ -65,12 +66,12 @@ class MonodepthOptions:
         self.parser.add_argument("--rough_metric_scale_weight", type=float, help="weight of rough metric scale loss", default=1)
         self.parser.add_argument("--fine_metric_scale_weight", type=float, help="weight of fine metric scale loss", default=1)
         self.parser.add_argument(
-            "--gradual_fine_metric_scale_weight", action="store_true", help="whether increasing fine_metric_scale_weight gradually"
+            "--gradual_metric_scale_weight", action="store_true", help="whether increasing/decreasing fine/rough_metric_scale_weight gradually"
         )
         self.parser.add_argument(
             "--gradual_limit_epoch",
             type=int,
-            help="upper limit of epoch for gradual increase when using --gradual_fine_metric_scale_weight",
+            help="upper limit of epoch for gradual increase when using --gradual_metric_scale_weight",
             default=20,
         )
         self.parser.add_argument("--scales", nargs="+", type=int, help="scales used in the loss", default=[0, 1, 2, 3])

@@ -629,7 +629,7 @@ class TrainerHybrid:
 
             if self.epoch > 0:
                 loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss.item()
-                if self.opt.gradual_fine_metric_scale_weight:
+                if self.opt.gradual_metric_scale_weight:
                     rate = min(self.epoch / self.opt.gradual_limit_epoch, 1)
                     loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss / (2**scale)
                 else:
@@ -653,13 +653,17 @@ class TrainerHybrid:
         for batch_idx in range(bs):
             cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx], batch_road[batch_idx])  # [?, 3]
             if self.epoch > 0:
-                loss = loss + F.gaussian_nll_loss(
-                    input=self.prev_mean_cam_height_expects_dict[0],
-                    target=cam_heights,
-                    var=self.prev_mean_cam_height_vars_dict[0],
-                    eps=0.001,
-                    reduction="mean",
-                )
+                match self.opt.cam_height_loss_func:
+                    case "gaussian_nll_loss":
+                        loss = loss + F.gaussian_nll_loss(
+                            input=self.prev_mean_cam_height_expects_dict[0],
+                            target=cam_heights,
+                            var=self.prev_mean_cam_height_vars_dict[0],
+                            eps=0.001,
+                            reduction="mean",
+                        )
+                    case "abs":
+                        loss = loss + torch.abs(self.prev_mean_cam_height_expects_dict[0] - cam_heights).mean()
             frame_unscaled_cam_heights[batch_idx] = cam_heights.detach().mean()
         return loss / bs, frame_unscaled_cam_heights
 
