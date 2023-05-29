@@ -230,8 +230,7 @@ class TrainerWithRoad:
         print("There are {:d} training items and {:d} validation items\n".format(len(train_dataset), len(val_dataset)))
 
         self.scale_init_dict = {scale: 0.0 for scale in self.opt.scales}
-        self.sum_cam_height_expects_dict = self.scale_init_dict.copy()
-        self.sum_cam_height_vars_dict = self.scale_init_dict.copy()
+        self.after_1st_batch = False
 
         if self.opt.annot_height:
             self.height_priors = torch.tensor(
@@ -275,17 +274,11 @@ class TrainerWithRoad:
         print(f"========= Training has started from {self.epoch} epoch. ========= ")
         for self.epoch in range(self.epoch, self.opt.num_epochs):
             self.n_inst_frames = 0
-            self.sum_cam_height_expects_dict = self.scale_init_dict.copy()
-            self.sum_cam_height_vars_dict = self.scale_init_dict.copy()
+            self.cam_height_expects_dict = self.scale_init_dict.copy()
+            self.cam_height_vars_dict = self.scale_init_dict.copy()
             self.train_epoch()
             val_loss_dict = self.val_epoch()
             val_loss = val_loss_dict[self.standard_metric]
-            self.prev_mean_cam_height_expects_dict = {
-                scale: sum_cam_height / self.n_inst_frames for scale, sum_cam_height in self.sum_cam_height_expects_dict.items()
-            }
-            self.prev_mean_cam_height_vars_dict = {
-                scale: sum_cam_height_var / self.n_inst_frames**2 for scale, sum_cam_height_var in self.sum_cam_height_vars_dict.items()
-            }
             if (lower_is_better and val_loss < th_best) or (not lower_is_better and val_loss > th_best):
                 self.save_model(is_best=True)
                 th_best = val_loss
@@ -319,11 +312,11 @@ class TrainerWithRoad:
                 if "depth_gt" in batch_input_dict:
                     self.compute_depth_losses(batch_input_dict, batch_output_dict, loss_dict)
                 self.log_train(batch_input_dict, batch_output_dict, loss_dict)
+            self.log_cam_height()
+            self.after_1st_batch = True
             del loss_dict
             torch.cuda.empty_cache()
             self.step += 1
-        if self.epoch > 0:
-            self.log_cam_height()
 
         self.model_lr_scheduler.step()
 
@@ -600,10 +593,14 @@ class TrainerWithRoad:
             )
 
             if mode == "train" and scaled_sum_cam_height_expects is not None:
-                self.sum_cam_height_expects_dict[scale] += scaled_sum_cam_height_expects
-                self.sum_cam_height_vars_dict[scale] += scaled_sum_cam_height_vars
+                self.cam_height_expects_dict[scale] = (
+                    self.cam_height_expects_dict[scale] * (self.n_inst_frames - (batch_n_insts > 0).sum()) + scaled_sum_cam_height_expects
+                ) / self.n_inst_frames
+                self.cam_height_vars_dict[scale] = (
+                    self.cam_height_vars_dict[scale] * (self.n_inst_frames - (batch_n_insts > 0).sum()) ** 2 + scaled_sum_cam_height_vars
+                ) / self.n_inst_frames**2
 
-            if self.epoch > 0:
+            if self.after_1st_batch:
                 loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss.item()
                 if self.opt.gradual_metric_scale_weight:
                     rate = min(self.epoch / self.opt.gradual_limit_epoch, 1)
@@ -628,18 +625,18 @@ class TrainerWithRoad:
         loss = 0.0
         for batch_idx in range(batch_size):
             cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx], batch_road[batch_idx])  # [?, 3]
-            if self.epoch > 0:
+            if self.after_1st_batch:
                 match self.opt.cam_height_loss_func:
                     case "gaussian_nll_loss":
                         loss = loss + F.gaussian_nll_loss(
-                            input=self.prev_mean_cam_height_expects_dict[0],
+                            input=self.cam_height_expects_dict[0],
                             target=cam_heights,
-                            var=self.prev_mean_cam_height_vars_dict[0],
+                            var=self.cam_height_vars_dict[0],
                             eps=0.001,
                             reduction="mean",
                         )
                     case "abs":
-                        loss = loss + torch.abs(self.prev_mean_cam_height_expects_dict[0] - cam_heights).mean()
+                        loss = loss + torch.abs(self.cam_height_expects_dict[0] - cam_heights).mean()
             frame_unscaled_cam_heights[batch_idx] = cam_heights.detach().mean()
         return loss / batch_size, frame_unscaled_cam_heights
 
@@ -735,8 +732,8 @@ class TrainerWithRoad:
     def log_cam_height(self):
         writer = self.writers["train"]
         for scale in self.opt.scales:
-            writer.add_scalar(f"cam_height_expect_{scale}", self.prev_mean_cam_height_expects_dict[scale], self.step)
-            writer.add_scalar(f"cam_height_var_{scale}", self.prev_mean_cam_height_vars_dict[scale], self.step)
+            writer.add_scalar(f"cam_height_expect_{scale}", self.cam_height_expects_dict[scale], self.step)
+            writer.add_scalar(f"cam_height_var_{scale}", self.cam_height_vars_dict[scale], self.step)
         writer.add_scalar("n_inst_frames", self.n_inst_frames, self.step)
 
     def log_train(self, input_dict, output_dict, loss_dict):
@@ -824,11 +821,11 @@ class TrainerWithRoad:
 
         cam_height_expect_path = os.path.join(save_folder, "cam_height_expect.pkl")
         with open(cam_height_expect_path, "wb") as f:
-            pickle.dump(self.prev_mean_cam_height_expects_dict, f, pickle.HIGHEST_PROTOCOL)
+            pickle.dump(self.cam_height_expects_dict, f, pickle.HIGHEST_PROTOCOL)
 
         cam_height_var_path = os.path.join(save_folder, "cam_height_var.pkl")
         with open(cam_height_var_path, "wb") as f:
-            pickle.dump(self.prev_mean_cam_height_vars_dict, f, pickle.HIGHEST_PROTOCOL)
+            pickle.dump(self.cam_height_vars_dict, f, pickle.HIGHEST_PROTOCOL)
 
         optimizer_save_path = os.path.join(save_folder, "adam.pth")
         torch.save(self.model_optimizer.state_dict(), optimizer_save_path)
@@ -861,16 +858,16 @@ class TrainerWithRoad:
         # load prev_cam_height
         cam_height_expect_path = weights_dir / "cam_height_expect.pkl"
         if cam_height_expect_path.exists():
-            print("Loading prev_mean_cam_height_expects_dict")
+            print("Loading cam_height_expects_dict")
             with open(cam_height_expect_path, "rb") as f:
-                self.prev_mean_cam_height_expects_dict = pickle.load(f)
+                self.cam_height_expects_dict = pickle.load(f)
         else:
             print(f"\n{cam_height_expect_path} does not exists.\n")
         cam_height_var_path = weights_dir / "cam_height_var.pkl"
         if cam_height_var_path.exists():
-            print("Loading prev_mean_cam_height_vars_dict")
+            print("Loading cam_height_vars_dict")
             with open(cam_height_var_path, "rb") as f:
-                self.prev_mean_cam_height_vars_dict = pickle.load(f)
+                self.cam_height_vars_dict = pickle.load(f)
         else:
             print(f"\n{cam_height_var_path} does not exists.\n")
 
