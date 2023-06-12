@@ -43,11 +43,22 @@ def depths2cam_pts(batch_depth: torch.Tensor, cam_grid: torch.Tensor) -> torch.T
 
 def cam_pts2cam_heights(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tensor:
     A = cam_pts[road_mask == 1]
-    ones = torch.ones((A.shape[0], 1), dtype=torch.float32, device=A.device)
-    A_T = A.T
-    normal = torch.linalg.pinv(A_T @ A) @ A_T @ ones
+    pinvs = torch.pinverse(A.detach())
+    ones = torch.ones((A.shape[0], 1), device=A.device).type_as(A)
+    normal = pinvs @ ones
     normal = normal / torch.linalg.norm(normal)
     return A @ normal
+
+
+# def cam_pts2cam_heights(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tensor:
+#     A = cam_pts[road_mask == 1].contiguous()
+#     # ones = torch.ones((A.shape[0], 1), dtype=torch.float32, device=A.device)
+#     ones = torch.ones((A.shape[0], 1), device=A.device).type_as(A)
+#     A_T = A.T
+#     normal = torch.linalg.pinv(A_T @ A) @ A_T @ ones
+#     # normal = torch.pinverse(A) @ ones
+#     normal = normal / torch.linalg.norm(normal)
+#     return A @ normal
 
 
 # def cam_pts2cam_heights(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tensor:

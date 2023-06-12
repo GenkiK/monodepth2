@@ -40,7 +40,7 @@ def color_aug_func(img, aug_params):
     return img
 
 
-def load_segms_labels_as_tensor(path: str) -> tuple[np.ndarray, np.ndarray]:
+def load_segms_labels_as_tensor(path: str) -> tuple[torch.Tensor, torch.Tensor]:
     npz = np.load(path)
     segms = torch.from_numpy(npz["segms"].astype(np.uint8))
     labels = torch.from_numpy(npz["labels"].astype(np.int8))
@@ -111,13 +111,9 @@ class MonoDatasetWithRoad(data.Dataset):
 
         img_interp = transforms.InterpolationMode.LANCZOS
         self.resize_func_dict = {}
-        self.segm_resize_func_dict = {}
         for i in range(self.num_scales):
             s = 2**i
             self.resize_func_dict[i] = transforms.Resize((self.height // s, self.width // s), interpolation=img_interp)
-            # self.segm_resize_func_dict[i] = transforms.Resize(
-            #     (self.height // s, self.width // s), interpolation=segm_interp
-            # )
         self.load_depth = self.check_depth()
 
     def preprocess(self, input_dict, color_aug):
@@ -132,16 +128,7 @@ class MonoDatasetWithRoad(data.Dataset):
             if key[0] == "color":
                 name, f_idx, _ = key
                 for scale in range(self.num_scales):
-                    # i-1をresize funcへの入力とすることで徐々にresizeしていってる．
-                    # TODO: このやり方では縮小しすぎてしまうのでは？論文読んで確かめる
                     input_dict[(name, f_idx, scale)] = self.resize_func_dict[scale](input_dict[(name, f_idx, scale - 1)])
-            # elif key[0] == "segms":
-            #     name, _ = key
-            #     for scale in range(self.num_scales):
-            #         # resizeによりsegmが消滅したときの処理を追加
-            #         # segmはスケールする必要がない（手法的に，小さくresizeした画像をinputして出てきた深度出力をupscaleするから）
-            #         # もしmonodepth1を使う(v1_multiscale)なら，segmもresizeする必要が出てくる
-            #         input_dict[(name, scale)] = self.segm_resize_func_dict[scale](input_dict[(name, scale - 1)])
 
         for key in list(input_dict):
             f = input_dict[key]

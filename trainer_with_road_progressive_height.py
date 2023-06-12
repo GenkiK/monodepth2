@@ -317,7 +317,7 @@ class TrainerWithRoad:
             del loss_dict
             torch.cuda.empty_cache()
             self.step += 1
-
+        self.after_1st_batch = False
         self.model_lr_scheduler.step()
 
     def process_batch(self, input_dict, mode="train"):

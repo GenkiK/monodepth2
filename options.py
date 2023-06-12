@@ -19,9 +19,19 @@ class MonodepthOptions:
 
         # PATHS
         self.parser.add_argument("--data_path", type=str, help="path to the training data", default=os.path.join(file_dir, "kitti_data"))
-        self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "logs"))
+        self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "new_logs"))
 
         # TRAINING options
+        self.parser.add_argument("--init_after_1st_epoch", action="store_true")
+        self.parser.add_argument("--log_dirname_1st_epoch", type=str, help="this argument is valid only when --init_after_1st_epoch")
+        self.parser.add_argument(
+            "--damping_update",
+            action="store_true",
+            help="whether updating cam_height only when the updated value is smaller than twice thr original value",
+        )
+        self.parser.add_argument("--gamma", type=float, help="gamma for step_lr_scheduler", default=0.1)
+        self.parser.add_argument("--start_with_cam_height_loss", action="store_true")  # TODO: this option is for debugging. remove this line.
+        self.parser.add_argument("--warmup", action="store_true")
         self.parser.add_argument("--cam_height_loss_func", type=str, choices=["gaussian_nll_loss", "abs"], default="gaussian_nll_loss")
         self.parser.add_argument("--kernel_size", help="kernel size for erosion", type=int, default=5)
         self.parser.add_argument("--random_seed", help="random seed", type=int)
@@ -89,7 +99,7 @@ class MonodepthOptions:
         # OPTIMIZATION options
         self.parser.add_argument("--batch_size", type=int, help="batch size", default=12)
         self.parser.add_argument("--learning_rate", type=float, help="learning rate", default=1e-4)
-        self.parser.add_argument("--num_epochs", type=int, help="number of epochs (including epochs of suspended training)", default=100)
+        self.parser.add_argument("--num_epochs", type=int, help="number of epochs (including epochs of suspended training)", default=20)
         self.parser.add_argument("--scheduler_step_size", type=int, help="step size of the scheduler", default=15)
 
         # ABLATION options

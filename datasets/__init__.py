@@ -1,3 +1,4 @@
 from .kitti_dataset import KITTIDepthDataset, KITTIOdomDataset, KITTIRAWDataset
+from .kitti_dataset_with_only_road import KITTIRAWDatasetWithOnlyRoad
 from .kitti_dataset_with_road import KITTIRAWDatasetWithRoad
 from .kitti_dataset_with_segm import KITTIRAWDatasetWithSegm

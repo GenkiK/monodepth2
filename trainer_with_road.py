@@ -1,9 +1,3 @@
-# Copyright Niantic 2019. Patent Pending. All rights reserved.
-#
-# This software is licensed under the terms of the Monodepth2 license
-# which allows for non-commercial use only, the full terms of which are made
-# available in the LICENSE file.
-
 from __future__ import absolute_import, division, print_function
 
 import json
@@ -27,6 +21,7 @@ from tqdm import tqdm
 
 import datasets
 import networks
+import warmup
 from layers import SSIM, BackprojectDepth, Project3D, compute_depth_errors, disp_to_depth, get_smooth_loss, transformation_from_parameters
 from utils import argmax_3d, cam_pts2cam_heights, masks_to_pix_heights, normalize_image, readlines, sec_to_hm_str
 
@@ -52,8 +47,8 @@ def pad_segms_labels(batch_segms, batch_labels):
 
 class TrainerWithRoad:
     def __init__(self, options):
-        can_resume = options.resume and options.ckpt_timestamp
         self.opt = options
+        can_resume = self.opt.resume and self.opt.ckpt_timestamp
 
         if can_resume:
             self.log_path = os.path.join(
@@ -134,6 +129,17 @@ class TrainerWithRoad:
         self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
         self.epoch = 0
 
+        if self.opt.init_after_1st_epoch:
+            if self.opt.log_dirname_1st_epoch is None:
+                # TODO: 学習済みのものがなかった場合に修正
+                raise TypeError("self.log_dirname_1st_epoch is None. Specify log_dirname_1st_epoch option when --init_after_1st_epoch.")
+            weights_dir_1st_epoch = (
+                Path(self.opt.root_log_dir) / f"{self.opt.width}x{self.opt.height}" / f"{self.opt.log_dirname_1st_epoch}" / "models/weights_0"
+            )
+            self.load_cam_heights(weights_dir_1st_epoch, alert_if_not_exist=True)
+            print("\nInitialized after 1st epoch!")
+            print(f"Initial cam_height is {self.prev_mean_cam_height_expects_dict[0]}\n")
+
         if can_resume:
             if self.opt.last_epoch_for_resume is None:
                 weights_dir, self.epoch = self.search_last_epoch()
@@ -142,12 +148,16 @@ class TrainerWithRoad:
                 self.epoch = self.opt.last_epoch_for_resume
             self.epoch += 1
             self.load_model(weights_dir)
-        self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, self.opt.scheduler_step_size, 0.1)
+            self.load_cam_heights(weights_dir, False)
+        if self.opt.warmup and self.epoch <= 1:
+            self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, self.opt.scheduler_step_size - 2, self.opt.gamma)
+        else:
+            self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, self.opt.scheduler_step_size, self.opt.gamma)
         self.model_lr_scheduler.last_epoch = self.epoch - 1
 
-        print("Training model named:\n  ", self.opt.model_name)
+        print("Training model named:  ", self.opt.model_name)
         print("Models and tensorboard events files are saved to:\n  ", self.log_path)
-        print("Training is using:\n  ", self.device)
+        print("Training is using:  ", self.device)
 
         # data
         self.dataset = datasets.KITTIRAWDatasetWithRoad
@@ -159,7 +169,8 @@ class TrainerWithRoad:
         img_ext = ".png" if self.opt.png else ".jpg"
 
         num_train_samples = len(train_filenames)
-        self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
+        self.n_iter = num_train_samples // self.opt.batch_size
+        self.num_total_steps = self.n_iter * self.opt.num_epochs
 
         train_dataset = self.dataset(
             self.opt.data_path,
@@ -226,7 +237,7 @@ class TrainerWithRoad:
         if not (self.standard_metric in self.depth_metric_names or self.standard_metric == "loss"):
             raise KeyError(f"{self.standard_metric} is not in {self.depth_metric_names + ['loss']}")
 
-        print("Using split:\n  ", self.opt.split)
+        print("Using split:  ", self.opt.split)
         print("There are {:d} training items and {:d} validation items\n".format(len(train_dataset), len(val_dataset)))
 
         self.scale_init_dict = {scale: 0.0 for scale in self.opt.scales}
@@ -272,20 +283,34 @@ class TrainerWithRoad:
         lower_is_better = self.standard_metric[:2] == "de" or self.standard_metric == "loss"
         th_best = 1000000 if lower_is_better else -1
 
+        self.scheduler = self.model_lr_scheduler
         print(f"========= Training has started from {self.epoch} epoch. ========= ")
         for self.epoch in range(self.epoch, self.opt.num_epochs):
+            self.is_2nd_epoch = self.epoch == 1
+            if self.is_2nd_epoch and self.opt.warmup:
+                self.scheduler = warmup.GradualWarmupScheduler(
+                    self.model_optimizer, multiplier=1.0, total_epoch=self.n_iter, after_scheduler=self.model_lr_scheduler
+                )
             self.n_inst_frames = 0
             self.sum_cam_height_expects_dict = self.scale_init_dict.copy()
             self.sum_cam_height_vars_dict = self.scale_init_dict.copy()
             self.train_epoch()
             val_loss_dict = self.val_epoch()
             val_loss = val_loss_dict[self.standard_metric]
-            self.prev_mean_cam_height_expects_dict = {
+            new_mean_cam_height_expects_dict = {
                 scale: sum_cam_height / self.n_inst_frames for scale, sum_cam_height in self.sum_cam_height_expects_dict.items()
             }
-            self.prev_mean_cam_height_vars_dict = {
+            new_mean_cam_height_vars_dict = {
                 scale: sum_cam_height_var / self.n_inst_frames**2 for scale, sum_cam_height_var in self.sum_cam_height_vars_dict.items()
             }
+            if not (
+                hasattr(self, "prev_mean_cam_height_expects_dict")
+                and self.opt.damping_update
+                and new_mean_cam_height_expects_dict[0] > self.prev_mean_cam_height_expects_dict[0] * 2
+            ):
+                self.prev_mean_cam_height_expects_dict = new_mean_cam_height_expects_dict
+                self.prev_mean_cam_height_vars_dict = new_mean_cam_height_vars_dict
+            self.log_cam_height()
             if (lower_is_better and val_loss < th_best) or (not lower_is_better and val_loss > th_best):
                 self.save_model(is_best=True)
                 th_best = val_loss
@@ -306,6 +331,8 @@ class TrainerWithRoad:
             self.model_optimizer.zero_grad(set_to_none=True)
             loss_dict["loss"].backward()
             self.model_optimizer.step()
+            if self.opt.warmup and self.is_2nd_epoch:
+                self.scheduler.step()
 
             duration = time.time() - before_op_time
 
@@ -322,10 +349,12 @@ class TrainerWithRoad:
             del loss_dict
             torch.cuda.empty_cache()
             self.step += 1
-        if self.epoch > 0:
-            self.log_cam_height()
 
-        self.model_lr_scheduler.step()
+        if self.opt.warmup:
+            if self.epoch == 0 or self.epoch > 1:
+                self.scheduler.step()
+        else:
+            self.scheduler.step()
 
     def process_batch(self, input_dict, mode="train"):
         """Pass a minibatch through the network and generate images and losses"""
@@ -447,7 +476,6 @@ class TrainerWithRoad:
             cam_points = self.backproject_depth[source_scale](depth, input_dict[("inv_K", source_scale)])
             h = self.opt.height
             w = self.opt.width
-            # TODO: [:, :-1, :]の意味
             output_dict[("cam_pts", scale)] = cam_points[:, :-1, :].view(-1, 3, h, w).permute(0, 2, 3, 1)  # [bs, h, w, 3]
             for adj_frame_idx in self.opt.adj_frame_idxs[1:]:
                 if adj_frame_idx == "s":
@@ -603,13 +631,15 @@ class TrainerWithRoad:
                 self.sum_cam_height_expects_dict[scale] += scaled_sum_cam_height_expects
                 self.sum_cam_height_vars_dict[scale] += scaled_sum_cam_height_vars
 
-            if self.epoch > 0:
+            if hasattr(self, "prev_mean_cam_height_expects_dict"):
                 loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss.item()
                 if self.opt.gradual_metric_scale_weight:
                     rate = min(self.epoch / self.opt.gradual_limit_epoch, 1)
-                    loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss / (2**scale)
+                    loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss
+                    # loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss / (2**scale)
                 else:
-                    loss += self.opt.fine_metric_scale_weight * fine_metric_loss / (2**scale)
+                    loss += self.opt.fine_metric_scale_weight * fine_metric_loss
+                    # loss += self.opt.fine_metric_scale_weight * fine_metric_loss / (2**scale)
 
             total_loss += loss
             loss_dict[f"loss/{scale}"] = loss.item()
@@ -623,12 +653,12 @@ class TrainerWithRoad:
         batch_cam_pts: torch.Tensor,  # [bs, h, w, 3]
         batch_road: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
-        batch_size = batch_cam_pts.shape[0]
-        frame_unscaled_cam_heights = torch.zeros(batch_size, device=batch_cam_pts.device)
+        bs = batch_cam_pts.shape[0]
+        frame_unscaled_cam_heights = torch.zeros(bs, device=batch_cam_pts.device)
         loss = 0.0
-        for batch_idx in range(batch_size):
+        for batch_idx in range(bs):
             cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx], batch_road[batch_idx])  # [?, 3]
-            if self.epoch > 0:
+            if hasattr(self, "prev_mean_cam_height_expects_dict"):
                 match self.opt.cam_height_loss_func:
                     case "gaussian_nll_loss":
                         loss = loss + F.gaussian_nll_loss(
@@ -640,8 +670,8 @@ class TrainerWithRoad:
                         )
                     case "abs":
                         loss = loss + torch.abs(self.prev_mean_cam_height_expects_dict[0] - cam_heights).mean()
-            frame_unscaled_cam_heights[batch_idx] = cam_heights.detach().mean()
-        return loss / batch_size, frame_unscaled_cam_heights
+            frame_unscaled_cam_heights[batch_idx] = cam_heights.detach().mean()  # TODO: meanは適切か？（medianなどの方がいい？）
+        return loss / bs, frame_unscaled_cam_heights
 
     def scale_cam_heights(
         self,
@@ -844,6 +874,27 @@ class TrainerWithRoad:
                 last_epoch = epoch
         return root_weights_dir / f"weights_{last_epoch}", last_epoch
 
+    def load_cam_heights(self, weights_dir: Path, alert_if_not_exist: bool):
+        # load prev_cam_height
+        cam_height_expect_path = weights_dir / "cam_height_expect.pkl"
+        if cam_height_expect_path.exists():
+            print("Loading prev_mean_cam_height_expects_dict")
+            with open(cam_height_expect_path, "rb") as f:
+                self.prev_mean_cam_height_expects_dict = pickle.load(f)
+        elif alert_if_not_exist:
+            raise FileNotFoundError(f"\n{cam_height_expect_path} does not exists.\n")
+        else:
+            print(f"\n{cam_height_expect_path} does not exists.\n")
+        cam_height_var_path = weights_dir / "cam_height_var.pkl"
+        if cam_height_var_path.exists():
+            print("Loading prev_mean_cam_height_vars_dict")
+            with open(cam_height_var_path, "rb") as f:
+                self.prev_mean_cam_height_vars_dict = pickle.load(f)
+        elif alert_if_not_exist:
+            raise FileNotFoundError(f"\n{cam_height_var_path} does not exists.\n")
+        else:
+            print(f"\n{cam_height_var_path} does not exists.\n")
+
     def load_model(self, weights_dir: Path):
         """Load model(s) from disk"""
 
@@ -857,22 +908,6 @@ class TrainerWithRoad:
             pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
             model_dict.update(pretrained_dict)
             self.models[model_name].load_state_dict(model_dict)
-
-        # load prev_cam_height
-        cam_height_expect_path = weights_dir / "cam_height_expect.pkl"
-        if cam_height_expect_path.exists():
-            print("Loading prev_mean_cam_height_expects_dict")
-            with open(cam_height_expect_path, "rb") as f:
-                self.prev_mean_cam_height_expects_dict = pickle.load(f)
-        else:
-            print(f"\n{cam_height_expect_path} does not exists.\n")
-        cam_height_var_path = weights_dir / "cam_height_var.pkl"
-        if cam_height_var_path.exists():
-            print("Loading prev_mean_cam_height_vars_dict")
-            with open(cam_height_var_path, "rb") as f:
-                self.prev_mean_cam_height_vars_dict = pickle.load(f)
-        else:
-            print(f"\n{cam_height_var_path} does not exists.\n")
 
         # load adam state
         optimizer_load_path = weights_dir / "adam.pth"
