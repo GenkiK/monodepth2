@@ -5,6 +5,7 @@ import os
 import pickle
 import time
 from argparse import Namespace
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -23,7 +24,7 @@ import datasets
 import networks
 import warmup
 from layers import SSIM, BackprojectDepth, Project3D, compute_depth_errors, disp_to_depth, get_smooth_loss, transformation_from_parameters
-from utils import argmax_3d, cam_pts2cam_heights, masks_to_pix_heights, normalize_image, readlines, sec_to_hm_str
+from utils import argmax_3d, cam_pts2cam_heights, erode, masks_to_pix_heights, normalize_image, readlines, sec_to_hm_str, seed_all
 
 segms_labels_str_set = ("segms", "labels")
 
@@ -49,6 +50,27 @@ class TrainerWithRoad:
     def __init__(self, options):
         self.opt = options
         can_resume = self.opt.resume and self.opt.ckpt_timestamp
+
+        if not can_resume and self.opt.init_after_1st_epoch:
+            if self.opt.log_dirname_1st_epoch is None:
+                opt_cp = deepcopy(self.opt)
+                opt_cp.init_after_1st_epoch = False
+                opt_cp.num_epochs = 1
+                opt_cp.model_name = f"1st_epoch_for_{opt_cp.model_name}"
+                print("================= Train just 1st epoch w/o cam_height_loss =================\n")
+                inner_trainer = TrainerWithRoad(opt_cp)
+                inner_trainer.train()
+                seed_all(self.opt.random_seed)
+                weights_dir_1st_epoch = Path(inner_trainer.log_path) / "models/weights_0"
+                del opt_cp
+                del inner_trainer
+                print("\n================= Training 1st epoch w/o cam_height_loss has done! =================\n")
+            else:
+                weights_dir_1st_epoch = (
+                    Path(self.opt.root_log_dir) / f"{self.opt.width}x{self.opt.height}" / f"{self.opt.log_dirname_1st_epoch}" / "models/weights_0"
+                )
+            self.load_cam_heights(weights_dir_1st_epoch, alert_if_not_exist=True)
+            print(f"Initial cam_height is {self.prev_mean_cam_height_expects_dict[0]}\n")
 
         if can_resume:
             self.log_path = os.path.join(
@@ -128,17 +150,6 @@ class TrainerWithRoad:
 
         self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
         self.epoch = 0
-
-        if self.opt.init_after_1st_epoch:
-            if self.opt.log_dirname_1st_epoch is None:
-                # TODO: 学習済みのものがなかった場合に修正
-                raise TypeError("self.log_dirname_1st_epoch is None. Specify log_dirname_1st_epoch option when --init_after_1st_epoch.")
-            weights_dir_1st_epoch = (
-                Path(self.opt.root_log_dir) / f"{self.opt.width}x{self.opt.height}" / f"{self.opt.log_dirname_1st_epoch}" / "models/weights_0"
-            )
-            self.load_cam_heights(weights_dir_1st_epoch, alert_if_not_exist=True)
-            print("\nInitialized after 1st epoch!")
-            print(f"Initial cam_height is {self.prev_mean_cam_height_expects_dict[0]}\n")
 
         if can_resume:
             if self.opt.last_epoch_for_resume is None:
@@ -536,10 +547,6 @@ class TrainerWithRoad:
         batch_labels = batch_labels[road_appear_idxs]
         batch_n_insts = batch_n_insts[road_appear_idxs]
 
-        if mode == "train":
-            # TODO: erodeした場合，batch_n_instsが変わるのでこれを修正する必要がある
-            self.n_inst_frames += (batch_n_insts > 0).sum()
-
         fy: float = input_dict[("K", source_scale)][0, 1, 1]
         batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
         for scale in self.opt.scales:
@@ -617,7 +624,7 @@ class TrainerWithRoad:
                 batch_cam_pts,
                 batch_road,
             )
-            scaled_sum_cam_height_expects, scaled_sum_cam_height_vars = self.scale_cam_heights(
+            scaled_sum_cam_height_expects, scaled_sum_cam_height_vars, batch_n_insts = self.scale_cam_heights(
                 batch_cam_pts,
                 batch_upscaled_depth,
                 batch_segms,
@@ -643,6 +650,9 @@ class TrainerWithRoad:
 
             total_loss += loss
             loss_dict[f"loss/{scale}"] = loss.item()
+
+        if mode == "train":
+            self.n_inst_frames += (batch_n_insts > 0).sum()
 
         total_loss /= self.num_scales
         loss_dict["loss"] = total_loss
@@ -682,16 +692,22 @@ class TrainerWithRoad:
         batch_n_insts: torch.Tensor,
         frame_unscaled_cam_heights: torch.Tensor,
         fy: float,
-    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[None, None, None]:
         if batch_n_insts.sum() == 0:
             return None, None
 
         _, h, w = batch_depth.shape
 
-        depth_repeat = batch_depth.detach().repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
-        # TODO: インスタンスに対してerosion処理を追加
         segms_flat = batch_segms.view(-1, h, w)
-        non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
+        if self.opt.enable_erosion:
+            batch_eroded_segms = erode(batch_segms, self.opt.kernel_size)
+            batch_n_insts = (batch_eroded_segms.sum((2, 3)) > 0).sum(1)
+            eroded_segms_flat = batch_eroded_segms.view(-1, h, w)
+            non_padded_channels = eroded_segms_flat.sum(dim=(1, 2)) > 0
+            eroded_segms_flat = eroded_segms_flat[non_padded_channels]
+        else:
+            non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
+        depth_repeat = batch_depth.detach().repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
         segms_flat = segms_flat[non_padded_channels]  # exclude padded channels
         labels_flat = batch_labels.view(-1)[non_padded_channels].long()
 
@@ -701,7 +717,10 @@ class TrainerWithRoad:
         depth_expects = height_expects * fy / obj_pix_heights
 
         cam_pts_repeat = batch_cam_pts.detach().repeat_interleave(batch_n_insts, dim=0)
-        masked_cam_pts = cam_pts_repeat * segms_flat.unsqueeze(-1)
+        if self.opt.enable_erosion:
+            masked_cam_pts = cam_pts_repeat * segms_flat.unsqueeze(-1)
+        else:
+            masked_cam_pts = cam_pts_repeat * eroded_segms_flat.unsqueeze(-1)
         masked_cam_pts[masked_cam_pts == 0] = 1000
         nearest_pts = argmax_3d(-torch.linalg.norm(masked_cam_pts, dim=3))  # [n_insts * bs, 2]
         nearest_depths = depth_repeat[torch.arange(depth_repeat.shape[0]), nearest_pts[:, 0], nearest_pts[:, 1]]  # [n_insts * bs, 2]
@@ -714,7 +733,7 @@ class TrainerWithRoad:
 
         scaled_sum_cam_height_expects = (frame_scale_expects * frame_unscaled_cam_heights).nansum()
         scaled_sum_cam_height_vars = (frame_scale_var * frame_unscaled_cam_heights**2).nansum()
-        return scaled_sum_cam_height_expects, scaled_sum_cam_height_vars
+        return scaled_sum_cam_height_expects, scaled_sum_cam_height_vars, batch_n_insts
 
     def compute_depth_losses(self, input_dict, output_dict, loss_dict):
         """Compute depth metrics, to allow monitoring during training

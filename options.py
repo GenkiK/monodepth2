@@ -22,6 +22,7 @@ class MonodepthOptions:
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "new_logs"))
 
         # TRAINING options
+        self.parser.add_argument("--enable_erosion", action="store_true", help="enable eroding object segms when computing camera height")
         self.parser.add_argument("--init_after_1st_epoch", action="store_true")
         self.parser.add_argument("--log_dirname_1st_epoch", type=str, help="this argument is valid only when --init_after_1st_epoch")
         self.parser.add_argument(

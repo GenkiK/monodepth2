@@ -600,57 +600,60 @@ class TrainerHybrid:
             loss_dict[f"loss/smoothness_{scale}"] = smooth_loss.item()
             loss += self.opt.disparity_smoothness * smooth_loss / (2**scale)
 
-            depth_repeat, segms_flat, obj_pix_heights, obj_height_expects, obj_height_vars = self.make_flats(
-                batch_upscaled_depth,
-                batch_segms,
-                batch_labels,
-                batch_n_insts,
-            )
+            if batch_road.shape[0] > 0:
+                fine_metric_loss, unscaled_cam_heights = self.compute_cam_heights(
+                    batch_cam_pts,
+                    batch_road,
+                )
+                if hasattr(self, "prev_mean_cam_height_expects_dict"):
+                    loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss.item()
+                    if self.opt.gradual_metric_scale_weight:
+                        rate = min(self.epoch / self.opt.gradual_limit_epoch, 1)
+                        loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss
+                    else:
+                        loss += self.opt.fine_metric_scale_weight * fine_metric_loss
             n_inst_appear_frames = (batch_n_insts > 0).sum()
-            rough_metric_loss = self.compute_rough_metric_loss(
-                depth_repeat,
-                segms_flat,
-                obj_pix_heights,
-                obj_height_expects,
-                obj_height_vars,
-                fy,
-                n_inst_appear_frames,
-            )
-            loss_dict[f"loss/rough_metric_{scale}"] = rough_metric_loss.item()
-            if self.opt.gradual_metric_scale_weight:
-                rate = max(1 - self.epoch / self.opt.gradual_limit_epoch, 0)
-                loss += self.opt.rough_metric_scale_weight * rate * rough_metric_loss
+            if n_inst_appear_frames == 0:
+                loss_dict[f"loss/rough_metric_{scale}"] = 0.0
             else:
-                loss += self.opt.rough_metric_scale_weight * rough_metric_loss
-
-            fine_metric_loss, unscaled_cam_heights = self.compute_cam_heights(
-                batch_cam_pts,
-                batch_road,
-            )
-            flat_road_appear_idxs = batch_road_appear_idxs.repeat_interleave(batch_n_insts, dim=0)
-            scaled_sum_cam_height_expects, scaled_sum_cam_height_vars = self.scale_cam_heights(
-                batch_cam_pts,
-                depth_repeat[flat_road_appear_idxs],
-                segms_flat[flat_road_appear_idxs],
-                obj_pix_heights[flat_road_appear_idxs],
-                obj_height_expects[flat_road_appear_idxs],
-                obj_height_vars[flat_road_appear_idxs],
-                batch_n_insts[batch_road_appear_idxs],
-                unscaled_cam_heights,
-                fy,
-            )
-
-            if mode == "train" and scaled_sum_cam_height_expects is not None:
-                self.sum_cam_height_expects_dict[scale] += scaled_sum_cam_height_expects
-                self.sum_cam_height_vars_dict[scale] += scaled_sum_cam_height_vars
-
-            if hasattr(self, "prev_mean_cam_height_expects_dict"):
-                loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss.item()
+                depth_repeat, segms_flat, obj_pix_heights, obj_height_expects, obj_height_vars = self.make_flats(
+                    batch_upscaled_depth,
+                    batch_segms,
+                    batch_labels,
+                    batch_n_insts,
+                )
+                rough_metric_loss = self.compute_rough_metric_loss(
+                    depth_repeat,
+                    segms_flat,
+                    obj_pix_heights,
+                    obj_height_expects,
+                    obj_height_vars,
+                    fy,
+                    n_inst_appear_frames,
+                )
+                loss_dict[f"loss/rough_metric_{scale}"] = rough_metric_loss.item()
                 if self.opt.gradual_metric_scale_weight:
-                    rate = min(self.epoch / self.opt.gradual_limit_epoch, 1)
-                    loss += self.opt.fine_metric_scale_weight * rate * fine_metric_loss
+                    rate = max(1 - self.epoch / self.opt.gradual_limit_epoch, 0)
+                    loss += self.opt.rough_metric_scale_weight * rate * rough_metric_loss
                 else:
-                    loss += self.opt.fine_metric_scale_weight * fine_metric_loss
+                    loss += self.opt.rough_metric_scale_weight * rough_metric_loss
+
+                flat_road_appear_idxs = batch_road_appear_idxs.repeat_interleave(batch_n_insts, dim=0)
+                scaled_sum_cam_height_expects, scaled_sum_cam_height_vars = self.scale_cam_heights(
+                    batch_cam_pts,
+                    depth_repeat[flat_road_appear_idxs],
+                    segms_flat[flat_road_appear_idxs],
+                    obj_pix_heights[flat_road_appear_idxs],
+                    obj_height_expects[flat_road_appear_idxs],
+                    obj_height_vars[flat_road_appear_idxs],
+                    batch_n_insts[batch_road_appear_idxs],
+                    unscaled_cam_heights,
+                    fy,
+                )
+
+                if mode == "train" and scaled_sum_cam_height_expects is not None:
+                    self.sum_cam_height_expects_dict[scale] += scaled_sum_cam_height_expects
+                    self.sum_cam_height_vars_dict[scale] += scaled_sum_cam_height_vars
 
             total_loss += loss
             loss_dict[f"loss/{scale}"] = loss.item()
@@ -697,6 +700,8 @@ class TrainerHybrid:
         fy: float,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
         # TODO: インスタンスに対してerosion処理を追加
+        if segms_flat.shape[0] == 0:
+            return None, None
         depth_expects = obj_height_expects * fy / obj_pix_heights
         cam_pts_repeat = batch_cam_pts.detach().repeat_interleave(batch_n_insts, dim=0)
         masked_cam_pts = cam_pts_repeat * segms_flat.unsqueeze(-1)
@@ -723,7 +728,7 @@ class TrainerHybrid:
         obj_height_vars: torch.Tensor,
         fy: float,
         n_inst_appear_frames: int,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    ) -> torch.Tensor:
         obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
         pred_heights = obj_pix_heights * obj_mean_depths / fy
         loss = F.gaussian_nll_loss(input=obj_height_expects, target=pred_heights, var=obj_height_vars, reduction="mean") / n_inst_appear_frames
