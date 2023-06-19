@@ -1,9 +1,3 @@
-# Copyright Niantic 2019. Patent Pending. All rights reserved.
-#
-# This software is licensed under the terms of the Monodepth2 license
-# which allows for non-commercial use only, the full terms of which are made
-# available in the LICENSE file.
-
 from __future__ import absolute_import, division, print_function
 
 import json
@@ -51,11 +45,9 @@ def pad_segms_labels(batch_segms, batch_labels):
 
 class TrainerWithSegm:
     def __init__(self, options):
-        can_resume = options.resume and options.ckpt_timestamp
         self.opt = options
-
+        can_resume = self.opt.resume and self.opt.ckpt_timestamp
         if can_resume:
-            # self.load_opts()
             self.log_path = os.path.join(
                 self.opt.root_log_dir,
                 f"{self.opt.width}x{self.opt.height}",
@@ -64,7 +56,6 @@ class TrainerWithSegm:
             if not os.path.exists(self.log_path):
                 raise FileNotFoundError(f"{self.log_path} does not exist.")
         else:
-            # self.opt = options
             self.log_path = os.path.join(
                 options.root_log_dir,
                 f"{options.width}x{options.height}",
@@ -135,28 +126,30 @@ class TrainerWithSegm:
         self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
         self.epoch = 0
         if can_resume:
-            weights_dir, self.epoch = self.search_last_epoch()
+            if self.opt.last_epoch_for_resume is None:
+                weights_dir, self.epoch = self.search_last_epoch()
+            else:
+                self.epoch = self.opt.last_epoch_for_resume
+                weights_dir = Path(self.log_path) / "models" / f"weights_{self.epoch}"
             self.epoch += 1
             self.load_model(weights_dir)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, self.opt.scheduler_step_size, 0.1)
         self.model_lr_scheduler.last_epoch = self.epoch - 1
 
-        print("Training model named:\n  ", self.opt.model_name)
+        print("Training model named:  ", self.opt.model_name)
         print("Models and tensorboard events files are saved to:\n  ", self.log_path)
-        print("Training is using:\n  ", self.device)
+        print("Training is using:  ", self.device)
 
         # data
-        datasets_dict = {"kitti": datasets.KITTIRAWDatasetWithSegm, "kitti_odom": datasets.KITTIOdomDataset}
-        self.dataset = datasets_dict[self.opt.dataset]
-
+        self.dataset = datasets.KITTIRAWDatasetWithSegm
         fpath = os.path.join(os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt")
-
         train_filenames = readlines(fpath.format("train"))
         val_filenames = readlines(fpath.format("val"))
         img_ext = ".png" if self.opt.png else ".jpg"
 
         num_train_samples = len(train_filenames)
-        self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
+        self.n_iter = num_train_samples // self.opt.batch_size
+        self.num_total_steps = self.n_iter * self.opt.num_epochs
 
         train_dataset = self.dataset(
             self.opt.data_path,
@@ -192,11 +185,11 @@ class TrainerWithSegm:
         self.val_loader = DataLoader(
             val_dataset,
             self.opt.batch_size,
-            True,
+            False,
             num_workers=self.opt.num_workers,
             pin_memory=True,
             drop_last=True,
-            collate_fn=collate_fn,  # TODO: とりあえずvalでもsegmsを読み込むようにしている．いらないようであれば修正（compute_losses()でsegmsを呼び出している部分をなくす）
+            collate_fn=collate_fn,
         )
         self.writers = {}
         for mode in ["train", "val"]:
@@ -223,7 +216,7 @@ class TrainerWithSegm:
         if not (self.standard_metric in self.depth_metric_names or self.standard_metric == "loss"):
             raise KeyError(f"{self.standard_metric} is not in {self.depth_metric_names + ['loss']}")
 
-        print("Using split:\n  ", self.opt.split)
+        print("Using split:  ", self.opt.split)
         print("There are {:d} training items and {:d} validation items\n".format(len(train_dataset), len(val_dataset)))
 
         if self.opt.annot_height:
@@ -285,7 +278,7 @@ class TrainerWithSegm:
             before_op_time = time.time()
 
             batch_input_dict = {key: ipt.to(self.device) for key, ipt in batch_input_dict.items()}
-            output_dict, loss_dict = self.process_batch(batch_input_dict)
+            batch_output_dict, loss_dict = self.process_batch(batch_input_dict)
 
             self.model_optimizer.zero_grad(set_to_none=True)
             loss_dict["loss"].backward()
@@ -301,8 +294,8 @@ class TrainerWithSegm:
                 self.log_time(batch_idx, duration, loss_dict["loss"].cpu().data)
 
                 if "depth_gt" in batch_input_dict:
-                    self.compute_depth_losses(batch_input_dict, output_dict, loss_dict)
-                self.log_train(batch_input_dict, output_dict, loss_dict)
+                    self.compute_depth_losses(batch_input_dict, batch_output_dict, loss_dict)
+                self.log_train(batch_input_dict, batch_output_dict, loss_dict)
             del loss_dict
             torch.cuda.empty_cache()
             self.step += 1
@@ -311,7 +304,6 @@ class TrainerWithSegm:
 
     def process_batch(self, input_dict):
         """Pass a minibatch through the network and generate images and losses"""
-        # input_dict = {key: ipt.to(self.device) for key, ipt in input_dict.items()}
 
         if self.opt.pose_model_type == "shared":
             # If we are using a shared encoder for both depth and pose (as advocated
@@ -412,7 +404,6 @@ class TrainerWithSegm:
             for loss_name in avg_loss_dict:
                 avg_loss_dict[loss_name] /= n_iter
             self.log_val(avg_loss_dict)
-            self.set_train()
             return avg_loss_dict
 
     def generate_images_pred(self, input_dict, output_dict):
@@ -478,12 +469,23 @@ class TrainerWithSegm:
         loss_dict = {}
         total_loss = 0
 
-        batch_segms: torch.Tensor = input_dict["padded_segms"]
-        batch_labels: torch.Tensor = input_dict["padded_labels"]
-        batch_n_insts: torch.Tensor = input_dict["n_insts"]
-
-        batch_K: torch.Tensor = input_dict[("K", source_scale)]
         batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
+        batch_n_insts: torch.Tensor = input_dict["n_insts"]
+        no_segms = batch_n_insts.sum() == 0
+        if not no_segms:
+            batch_segms: torch.Tensor = input_dict["padded_segms"]
+            batch_labels: torch.Tensor = input_dict["padded_labels"]
+            fy: float = input_dict[("K", source_scale)][0, 1, 1]
+
+            _, _, h, w = batch_segms.shape
+            segms_flat = batch_segms.view(-1, h, w)
+            non_padded_channels = segms_flat.sum((1, 2)) > 0
+            segms_flat = segms_flat[non_padded_channels]
+            labels_flat = batch_labels.view(-1)[non_padded_channels].long()
+
+            height_expects = self.height_priors[labels_flat, 0]
+            height_vars = self.height_priors[labels_flat, 1]
+            obj_pix_heights = masks_to_pix_heights(segms_flat)
         for scale in self.opt.scales:
             loss = 0.0
             reprojection_losses = []
@@ -554,9 +556,20 @@ class TrainerWithSegm:
             loss_dict[f"loss/smoothness_{scale}"] = smooth_loss.item()
             loss += self.opt.disparity_smoothness * smooth_loss / (2**scale)
 
-            rough_metric_loss = self.compute_rough_metric_loss(batch_upscaled_depth, batch_segms, batch_labels, batch_n_insts, batch_K)
-            loss_dict[f"loss/rough_metric_{scale}"] = rough_metric_loss.item()
-            loss += self.opt.rough_metric_scale_weight * rough_metric_loss / (2**scale)
+            if not no_segms:
+                rough_metric_loss = self.compute_rough_metric_loss(
+                    batch_upscaled_depth,
+                    batch_n_insts,
+                    segms_flat,
+                    height_expects,
+                    height_vars,
+                    obj_pix_heights,
+                    fy,
+                )
+                loss_dict[f"loss/rough_metric_{scale}"] = rough_metric_loss.item()
+                loss += self.opt.rough_metric_scale_weight * rough_metric_loss / (2**scale)
+            else:
+                loss_dict[f"loss/rough_metric_{scale}"] = 0.0
 
             total_loss += loss
             loss_dict[f"loss/{scale}"] = loss.item()
@@ -568,40 +581,17 @@ class TrainerWithSegm:
     def compute_rough_metric_loss(
         self,
         batch_depth: torch.Tensor,
-        batch_segms: torch.Tensor,
-        batch_labels: torch.Tensor,
         batch_n_insts: torch.Tensor,
-        batch_K: torch.Tensor,
+        segms_flat: torch.Tensor,
+        height_expects: torch.Tensor,
+        height_vars: torch.Tensor,
+        obj_pix_heights: torch.Tensor,
+        fy: float,
     ) -> torch.Tensor | None:
-        if batch_n_insts.sum() == 0:
-            return 0.0
-
-        bs, h, w = batch_depth.shape
-
-        assert batch_n_insts.sum() < bs * batch_segms.shape[1]  # batch_segmsがcompressされていないか
-
-        fy_repeat = batch_K[:, 1, 1].repeat_interleave(batch_n_insts, dim=0)
-        assert fy_repeat.shape == (batch_n_insts.sum(),)
-
         depth_repeat = batch_depth.repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
-        assert depth_repeat.shape == (batch_n_insts.sum(), h, w)
-
-        segms_flat = batch_segms.view(-1, h, w)
-        non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
-        segms_flat = segms_flat[non_padded_channels]  # exclude padded channels
-        assert segms_flat.shape == (batch_n_insts.sum(), h, w)
-
         obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
-
-        obj_pix_heights = masks_to_pix_heights(segms_flat)
-
-        assert (obj_pix_heights < 0).sum() == 0
-
-        labels_flat = batch_labels.view(-1)[non_padded_channels].long()
-        height_priors = self.height_priors[labels_flat, :]
-
-        pred_heights = obj_pix_heights * obj_mean_depths / fy_repeat
-        loss = F.gaussian_nll_loss(input=height_priors[:, 0], target=pred_heights, var=height_priors[:, 1], reduction="mean") / self.opt.batch_size
+        pred_heights = obj_pix_heights * obj_mean_depths / fy
+        loss = F.gaussian_nll_loss(input=height_expects, target=pred_heights, var=height_vars, reduction="mean") / self.opt.batch_size
         assert not loss.isnan()
         return loss
 
