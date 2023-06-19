@@ -50,28 +50,6 @@ class TrainerWithRoad:
     def __init__(self, options):
         self.opt = options
         can_resume = self.opt.resume and self.opt.ckpt_timestamp
-
-        if not can_resume and self.opt.init_after_1st_epoch:
-            if self.opt.log_dirname_1st_epoch is None:
-                opt_cp = deepcopy(self.opt)
-                opt_cp.init_after_1st_epoch = False
-                opt_cp.num_epochs = 1
-                opt_cp.model_name = f"1st_epoch_for_{opt_cp.model_name}"
-                print("================= Train just 1st epoch w/o cam_height_loss =================\n")
-                inner_trainer = TrainerWithRoad(opt_cp)
-                inner_trainer.train()
-                seed_all(self.opt.random_seed)
-                weights_dir_1st_epoch = Path(inner_trainer.log_path) / "models/weights_0"
-                del opt_cp
-                del inner_trainer
-                print("\n================= Training 1st epoch w/o cam_height_loss has done! =================\n")
-            else:
-                weights_dir_1st_epoch = (
-                    Path(self.opt.root_log_dir) / f"{self.opt.width}x{self.opt.height}" / f"{self.opt.log_dirname_1st_epoch}" / "models/weights_0"
-                )
-            self.load_cam_heights(weights_dir_1st_epoch, alert_if_not_exist=True)
-            print(f"Initial cam_height is {self.prev_mean_cam_height_expects_dict[0]}\n")
-
         if can_resume:
             self.log_path = os.path.join(
                 self.opt.root_log_dir,
@@ -86,6 +64,28 @@ class TrainerWithRoad:
                 f"{options.width}x{options.height}",
                 f"{options.model_name}{'_' if options.model_name else ''}{datetime.now().strftime('%m-%d-%H:%M')}",
             )
+
+        if not can_resume and self.opt.init_after_1st_epoch:
+            if self.opt.log_dirname_1st_epoch is None:
+                opt_cp = deepcopy(self.opt)
+                opt_cp.init_after_1st_epoch = False
+                opt_cp.num_epochs = 1
+                opt_cp.model_name = f"1st_epoch_for_{opt_cp.model_name}"
+                opt_cp.damping_update = False
+                print("================= Train just 1st epoch w/o cam_height_loss =================\n")
+                inner_trainer = TrainerWithRoad(opt_cp)
+                inner_trainer.train()
+                seed_all(self.opt.random_seed)
+                weights_dir_1st_epoch = Path(inner_trainer.log_path) / "models/weights_0"
+                del opt_cp
+                del inner_trainer
+                print("\n================= Training 1st epoch w/o cam_height_loss has done! =================\n")
+            else:
+                weights_dir_1st_epoch = (
+                    Path(self.opt.root_log_dir) / f"{self.opt.width}x{self.opt.height}" / f"{self.opt.log_dirname_1st_epoch}" / "models/weights_0"
+                )
+            self.load_cam_heights(weights_dir_1st_epoch, alert_if_not_exist=True)
+            print(f"Initial cam_height is {self.prev_mean_cam_height_expects_dict[0]}\n")
 
         # checking height and width are multiples of 32
         assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
@@ -155,8 +155,8 @@ class TrainerWithRoad:
             if self.opt.last_epoch_for_resume is None:
                 weights_dir, self.epoch = self.search_last_epoch()
             else:
-                weights_dir = Path(self.log_path) / "models" / f"weights_{self.opt.last_epoch_for_resume}"
                 self.epoch = self.opt.last_epoch_for_resume
+                weights_dir = Path(self.log_path) / "models" / f"weights_{self.epoch}"
             self.epoch += 1
             self.load_model(weights_dir)
             self.load_cam_heights(weights_dir, False)
@@ -172,9 +172,7 @@ class TrainerWithRoad:
 
         # data
         self.dataset = datasets.KITTIRAWDatasetWithRoad
-
         fpath = os.path.join(os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt")
-
         train_filenames = readlines(fpath.format("train"))
         val_filenames = readlines(fpath.format("val"))
         img_ext = ".png" if self.opt.png else ".jpg"
@@ -314,11 +312,21 @@ class TrainerWithRoad:
             new_mean_cam_height_vars_dict = {
                 scale: sum_cam_height_var / self.n_inst_frames**2 for scale, sum_cam_height_var in self.sum_cam_height_vars_dict.items()
             }
-            if not (
-                hasattr(self, "prev_mean_cam_height_expects_dict")
-                and self.opt.damping_update
-                and new_mean_cam_height_expects_dict[0] > self.prev_mean_cam_height_expects_dict[0] * 2
-            ):
+            cond1 = not hasattr(self, "prev_mean_cam_height_expects_dict")
+            cond2 = not self.opt.damping_update or (
+                self.opt.damping_update and new_mean_cam_height_expects_dict[0] < self.prev_mean_cam_height_expects_dict[0] * 2
+            )
+            cond3 = (self.opt.wo_1st2nd_update and self.epoch > 1) or (not self.opt.wo_1st2nd_update)
+            if cond1 or (cond2 and cond3):
+                # if (
+                #     (self.opt.damping_update and new_mean_cam_height_expects_dict[0] < self.prev_mean_cam_height_expects_dict[0] * 2)
+                #     and ((self.opt.wo_1st2nd_update and self.epoch > 0) or (not self.opt.wo_1st2nd_update))
+                # ) or (not self.opt.damping_update and ((self.opt.wo_1st2nd_update and self.epoch > 0) or (not self.opt.wo_1st2nd_update))):
+                # updateすべきとき
+                # - "prev_mean..."が存在しないとき
+                # - damping_updateがFalseのとき
+                # - damping updateがTrueで更新値が２倍以下の時
+                # - self.epoch == 0 かつ self.opt.wo_1st2nd_updateがFalseのとき
                 self.prev_mean_cam_height_expects_dict = new_mean_cam_height_expects_dict
                 self.prev_mean_cam_height_vars_dict = new_mean_cam_height_vars_dict
             self.log_cam_height()
@@ -547,6 +555,27 @@ class TrainerWithRoad:
         batch_labels = batch_labels[road_appear_idxs]
         batch_n_insts = batch_n_insts[road_appear_idxs]
 
+        _, _, h, w = batch_segms.shape
+        segms_flat = batch_segms.view(-1, h, w)
+        no_segms = segms_flat.shape[0] == 0
+        if not no_segms:
+            if self.opt.enable_erosion:
+                batch_eroded_segms = erode(batch_segms, self.opt.kernel_size)
+                batch_n_insts = (batch_eroded_segms.sum((2, 3)) > 0).sum(1)
+                eroded_segms_flat = batch_eroded_segms.view(-1, h, w)
+                non_padded_channels = eroded_segms_flat.sum((1, 2)) > 0
+                eroded_segms_flat = eroded_segms_flat[non_padded_channels]
+            else:
+                non_padded_channels = segms_flat.sum((1, 2)) > 0
+            segms_flat = segms_flat[non_padded_channels]
+            labels_flat = batch_labels.view(-1)[non_padded_channels].long()
+            height_expects = self.height_priors[labels_flat, 0]
+            height_vars = self.height_priors[labels_flat, 1]
+            obj_pix_heights = masks_to_pix_heights(segms_flat)
+
+        if mode == "train":
+            self.n_inst_frames += (batch_n_insts > 0).sum()
+
         fy: float = input_dict[("K", source_scale)][0, 1, 1]
         batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
         for scale in self.opt.scales:
@@ -624,19 +653,22 @@ class TrainerWithRoad:
                 batch_cam_pts,
                 batch_road,
             )
-            scaled_sum_cam_height_expects, scaled_sum_cam_height_vars, batch_n_insts = self.scale_cam_heights(
-                batch_cam_pts,
-                batch_upscaled_depth,
-                batch_segms,
-                batch_labels,
-                batch_n_insts,
-                unscaled_cam_heights,
-                fy,
-            )
+            if not no_segms:
+                scaled_sum_cam_height_expects, scaled_sum_cam_height_vars = self.scale_cam_heights(
+                    batch_cam_pts,
+                    batch_upscaled_depth,
+                    batch_n_insts,
+                    eroded_segms_flat if self.opt.enable_erosion else segms_flat,
+                    obj_pix_heights,
+                    height_expects,
+                    height_vars,
+                    unscaled_cam_heights,
+                    fy,
+                )
 
-            if mode == "train" and scaled_sum_cam_height_expects is not None:
-                self.sum_cam_height_expects_dict[scale] += scaled_sum_cam_height_expects
-                self.sum_cam_height_vars_dict[scale] += scaled_sum_cam_height_vars
+                if mode == "train" and scaled_sum_cam_height_expects is not None:
+                    self.sum_cam_height_expects_dict[scale] += scaled_sum_cam_height_expects
+                    self.sum_cam_height_vars_dict[scale] += scaled_sum_cam_height_vars
 
             if hasattr(self, "prev_mean_cam_height_expects_dict"):
                 loss_dict[f"loss/fine_metric_{scale}"] = fine_metric_loss.item()
@@ -650,9 +682,6 @@ class TrainerWithRoad:
 
             total_loss += loss
             loss_dict[f"loss/{scale}"] = loss.item()
-
-        if mode == "train":
-            self.n_inst_frames += (batch_n_insts > 0).sum()
 
         total_loss /= self.num_scales
         loss_dict["loss"] = total_loss
@@ -687,43 +716,29 @@ class TrainerWithRoad:
         self,
         batch_cam_pts: torch.Tensor,  # [bs, h, w, 3]
         batch_depth: torch.Tensor,
-        batch_segms: torch.Tensor,
-        batch_labels: torch.Tensor,
         batch_n_insts: torch.Tensor,
+        segms_flat: torch.Tensor,
+        obj_pix_heights: torch.Tensor,
+        height_expects: torch.Tensor,
+        height_vars: torch.Tensor,
         frame_unscaled_cam_heights: torch.Tensor,
         fy: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[None, None, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
         if batch_n_insts.sum() == 0:
             return None, None
-
-        _, h, w = batch_depth.shape
-
-        segms_flat = batch_segms.view(-1, h, w)
-        if self.opt.enable_erosion:
-            batch_eroded_segms = erode(batch_segms, self.opt.kernel_size)
-            batch_n_insts = (batch_eroded_segms.sum((2, 3)) > 0).sum(1)
-            eroded_segms_flat = batch_eroded_segms.view(-1, h, w)
-            non_padded_channels = eroded_segms_flat.sum(dim=(1, 2)) > 0
-            eroded_segms_flat = eroded_segms_flat[non_padded_channels]
-        else:
-            non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
         depth_repeat = batch_depth.detach().repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
-        segms_flat = segms_flat[non_padded_channels]  # exclude padded channels
-        labels_flat = batch_labels.view(-1)[non_padded_channels].long()
-
-        obj_pix_heights = masks_to_pix_heights(segms_flat)
-        height_expects = self.height_priors[labels_flat, 0]
-        height_vars = self.height_priors[labels_flat, 1]
         depth_expects = height_expects * fy / obj_pix_heights
-
-        cam_pts_repeat = batch_cam_pts.detach().repeat_interleave(batch_n_insts, dim=0)
-        if self.opt.enable_erosion:
-            masked_cam_pts = cam_pts_repeat * segms_flat.unsqueeze(-1)
+        if self.opt.use_median_depth:
+            masked_depth_repeat = depth_repeat * segms_flat
+            nearest_depths = torch.zeros((depth_repeat.shape[0],), dtype=torch.float32, device=self.device)
+            for i in range(masked_depth_repeat.shape[0]):
+                nearest_depths[i] = masked_depth_repeat[i][masked_depth_repeat[i] > 0].quantile(q=0.5)
         else:
-            masked_cam_pts = cam_pts_repeat * eroded_segms_flat.unsqueeze(-1)
-        masked_cam_pts[masked_cam_pts == 0] = 1000
-        nearest_pts = argmax_3d(-torch.linalg.norm(masked_cam_pts, dim=3))  # [n_insts * bs, 2]
-        nearest_depths = depth_repeat[torch.arange(depth_repeat.shape[0]), nearest_pts[:, 0], nearest_pts[:, 1]]  # [n_insts * bs, 2]
+            cam_pts_repeat = batch_cam_pts.detach().repeat_interleave(batch_n_insts, dim=0)
+            masked_cam_pts = cam_pts_repeat * segms_flat.unsqueeze(-1)
+            masked_cam_pts[masked_cam_pts == 0] = 1000
+            nearest_pts = argmax_3d(-torch.linalg.norm(masked_cam_pts, dim=3))  # [n_insts * bs, 2]
+            nearest_depths = depth_repeat[torch.arange(depth_repeat.shape[0]), nearest_pts[:, 0], nearest_pts[:, 1]]  # [n_insts * bs, 2]
 
         batch_n_insts_lst = batch_n_insts.tolist()
         split_scale_expects = torch.split(depth_expects / nearest_depths, batch_n_insts_lst)
@@ -733,7 +748,7 @@ class TrainerWithRoad:
 
         scaled_sum_cam_height_expects = (frame_scale_expects * frame_unscaled_cam_heights).nansum()
         scaled_sum_cam_height_vars = (frame_scale_var * frame_unscaled_cam_heights**2).nansum()
-        return scaled_sum_cam_height_expects, scaled_sum_cam_height_vars, batch_n_insts
+        return scaled_sum_cam_height_expects, scaled_sum_cam_height_vars
 
     def compute_depth_losses(self, input_dict, output_dict, loss_dict):
         """Compute depth metrics, to allow monitoring during training
@@ -782,11 +797,11 @@ class TrainerWithRoad:
         )
 
     def log_cam_height(self):
-        writer = self.writers["train"]
-        for scale in self.opt.scales:
-            writer.add_scalar(f"cam_height_expect_{scale}", self.prev_mean_cam_height_expects_dict[scale], self.step)
-            writer.add_scalar(f"cam_height_var_{scale}", self.prev_mean_cam_height_vars_dict[scale], self.step)
-        writer.add_scalar("n_inst_frames", self.n_inst_frames, self.step)
+        for writer in self.writers.values():
+            for scale in self.opt.scales:
+                writer.add_scalar(f"cam_height_expect_{scale}", self.prev_mean_cam_height_expects_dict[scale], self.step)
+                writer.add_scalar(f"cam_height_var_{scale}", self.prev_mean_cam_height_vars_dict[scale], self.step)
+            writer.add_scalar("n_inst_frames", self.n_inst_frames, self.step)
 
     def log_train(self, input_dict, output_dict, loss_dict):
         """Write an event to the tensorboard events file"""

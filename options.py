@@ -22,9 +22,13 @@ class MonodepthOptions:
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "new_logs"))
 
         # TRAINING options
+        self.parser.add_argument(
+            "--use_median_depth", action="store_true", help="use median depth over instances as an representative depth for calculating scale factor"
+        )
         self.parser.add_argument("--enable_erosion", action="store_true", help="enable eroding object segms when computing camera height")
         self.parser.add_argument("--init_after_1st_epoch", action="store_true")
         self.parser.add_argument("--log_dirname_1st_epoch", type=str, help="this argument is valid only when --init_after_1st_epoch")
+        self.parser.add_argument("--wo_1st2nd_update", action="store_true", help="without updating camera height after 1st epoch")
         self.parser.add_argument(
             "--damping_update",
             action="store_true",
@@ -100,7 +104,7 @@ class MonodepthOptions:
         # OPTIMIZATION options
         self.parser.add_argument("--batch_size", type=int, help="batch size", default=12)
         self.parser.add_argument("--learning_rate", type=float, help="learning rate", default=1e-4)
-        self.parser.add_argument("--num_epochs", type=int, help="number of epochs (including epochs of suspended training)", default=20)
+        self.parser.add_argument("--num_epochs", type=int, help="number of epochs (including epochs of suspended training)", default=25)
         self.parser.add_argument("--scheduler_step_size", type=int, help="step size of the scheduler", default=15)
 
         # ABLATION options
