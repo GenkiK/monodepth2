@@ -689,13 +689,13 @@ class TrainerWithRoad:
 
     def compute_cam_heights(
         self,
-        batch_cam_pts: torch.Tensor,  # [bs, h, w, 3]
+        batch_cam_pts: torch.Tensor,  # [n_road_appear_frames, h, w, 3]
         batch_road: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
-        bs = batch_cam_pts.shape[0]
-        frame_unscaled_cam_heights = torch.zeros(bs, device=batch_cam_pts.device)
+        n_road_appear_frames = batch_cam_pts.shape[0]
+        frame_unscaled_cam_heights = torch.zeros(n_road_appear_frames, device=batch_cam_pts.device)
         loss = 0.0
-        for batch_idx in range(bs):
+        for batch_idx in range(n_road_appear_frames):
             cam_heights = cam_pts2cam_heights(batch_cam_pts[batch_idx], batch_road[batch_idx])  # [?, 3]
             if hasattr(self, "prev_mean_cam_height_expects_dict"):
                 match self.opt.cam_height_loss_func:
@@ -710,7 +710,7 @@ class TrainerWithRoad:
                     case "abs":
                         loss = loss + torch.abs(self.prev_mean_cam_height_expects_dict[0] - cam_heights).mean()
             frame_unscaled_cam_heights[batch_idx] = cam_heights.detach().mean()  # TODO: meanは適切か？（medianなどの方がいい？）
-        return loss / bs, frame_unscaled_cam_heights
+        return loss / n_road_appear_frames, frame_unscaled_cam_heights
 
     def scale_cam_heights(
         self,
@@ -728,11 +728,12 @@ class TrainerWithRoad:
             return None, None
         depth_repeat = batch_depth.detach().repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
         depth_expects = height_expects * fy / obj_pix_heights
-        if self.opt.use_median_depth:
+        if self.opt.use_median_depth or self.opt.use_1st_quartile_depth:
+            q = 0.5 if self.opt.use_median_depth else 0.25
             masked_depth_repeat = depth_repeat * segms_flat
             nearest_depths = torch.zeros((depth_repeat.shape[0],), dtype=torch.float32, device=self.device)
             for i in range(masked_depth_repeat.shape[0]):
-                nearest_depths[i] = masked_depth_repeat[i][masked_depth_repeat[i] > 0].quantile(q=0.5)
+                nearest_depths[i] = masked_depth_repeat[i][masked_depth_repeat[i] > 0].quantile(q=q)
         else:
             cam_pts_repeat = batch_cam_pts.detach().repeat_interleave(batch_n_insts, dim=0)
             masked_cam_pts = cam_pts_repeat * segms_flat.unsqueeze(-1)

@@ -471,8 +471,8 @@ class TrainerWithSegm:
 
         batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
         batch_n_insts: torch.Tensor = input_dict["n_insts"]
-        no_segms = batch_n_insts.sum() == 0
-        if not no_segms:
+        n_inst_appear_frames = (batch_n_insts > 0).sum()
+        if n_inst_appear_frames > 0:
             batch_segms: torch.Tensor = input_dict["padded_segms"]
             batch_labels: torch.Tensor = input_dict["padded_labels"]
             fy: float = input_dict[("K", source_scale)][0, 1, 1]
@@ -480,6 +480,7 @@ class TrainerWithSegm:
             _, _, h, w = batch_segms.shape
             segms_flat = batch_segms.view(-1, h, w)
             non_padded_channels = segms_flat.sum((1, 2)) > 0
+            n_inst_appear_frames = non_padded_channels.sum()
             segms_flat = segms_flat[non_padded_channels]
             labels_flat = batch_labels.view(-1)[non_padded_channels].long()
 
@@ -556,15 +557,9 @@ class TrainerWithSegm:
             loss_dict[f"loss/smoothness_{scale}"] = smooth_loss.item()
             loss += self.opt.disparity_smoothness * smooth_loss / (2**scale)
 
-            if not no_segms:
+            if n_inst_appear_frames > 0:
                 rough_metric_loss = self.compute_rough_metric_loss(
-                    batch_upscaled_depth,
-                    batch_n_insts,
-                    segms_flat,
-                    height_expects,
-                    height_vars,
-                    obj_pix_heights,
-                    fy,
+                    batch_upscaled_depth, batch_n_insts, segms_flat, height_expects, height_vars, obj_pix_heights, fy, n_inst_appear_frames
                 )
                 loss_dict[f"loss/rough_metric_{scale}"] = rough_metric_loss.item()
                 loss += self.opt.rough_metric_scale_weight * rough_metric_loss / (2**scale)
@@ -587,13 +582,26 @@ class TrainerWithSegm:
         height_vars: torch.Tensor,
         obj_pix_heights: torch.Tensor,
         fy: float,
+        n_inst_appear_frames: int,
     ) -> torch.Tensor | None:
         depth_repeat = batch_depth.repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
-        obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
-        pred_heights = obj_pix_heights * obj_mean_depths / fy
-        loss = F.gaussian_nll_loss(input=height_expects, target=pred_heights, var=height_vars, reduction="mean") / self.opt.batch_size
+        match self.opt.rough_metric_loss_func:
+            case "gaussian_nll_loss":
+                obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
+                pred_heights = obj_pix_heights * obj_mean_depths / fy
+                loss = F.gaussian_nll_loss(input=height_expects, target=pred_heights, var=height_vars, reduction="mean")
+            case "abs":
+                obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
+                pred_heights = obj_pix_heights * obj_mean_depths / fy
+                loss = torch.abs(height_expects - pred_heights).mean()
+            case "mean_after_abs":
+                # obj_pix_heights: [sum(batch_n_insts),]
+                # depth_repeat: [sum(batch_n_insts), h, w]
+                # height_expects: [sum(batch_n_insts),]
+                pred_heights = obj_pix_heights[:, None, None] * depth_repeat / fy  # [sum(batch_n_insts), h, w]
+                loss = (torch.abs((height_expects[:, None, None] - pred_heights) * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2))).mean()
         assert not loss.isnan()
-        return loss
+        return loss / n_inst_appear_frames
 
     def compute_depth_losses(self, input_dict, output_dict, loss_dict):
         """Compute depth metrics, to allow monitoring during training

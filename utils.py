@@ -11,6 +11,7 @@ import os
 import random
 import urllib
 import zipfile
+from math import exp
 
 import numpy as np
 import torch
@@ -28,6 +29,10 @@ def seed_all(seed):
     torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.benchmark = True  # TODO: change to False for reproducibility
+
+
+def sigmoid(x: int | float) -> float:
+    return 1 / (1 + exp(-x))
 
 
 def masks_to_pix_heights(masks: torch.Tensor) -> torch.Tensor:

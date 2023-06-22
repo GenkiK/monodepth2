@@ -25,10 +25,22 @@ class MonodepthOptions:
         self.parser.add_argument(
             "--use_median_depth", action="store_true", help="use median depth over instances as an representative depth for calculating scale factor"
         )
+        self.parser.add_argument(
+            "--use_1st_quartile_depth",
+            action="store_true",
+            help="use 1st quartile depth over instances as an representative depth for calculating scale factor",
+        )
         self.parser.add_argument("--enable_erosion", action="store_true", help="enable eroding object segms when computing camera height")
         self.parser.add_argument("--init_after_1st_epoch", action="store_true")
         self.parser.add_argument("--log_dirname_1st_epoch", type=str, help="this argument is valid only when --init_after_1st_epoch")
-        self.parser.add_argument("--wo_1st2nd_update", action="store_true", help="without updating camera height after 1st epoch")
+        self.parser.add_argument("--wo_1st_update", action="store_true", help="without updating camera height after 1st epoch")
+        self.parser.add_argument("--wo_1st2nd_update", action="store_true", help="without updating camera height after 2nd epoch")
+        self.parser.add_argument(
+            "--sparse_update", action="store_true", help="occasionally update camera height. When this argument is True, specify --update_freq."
+        )
+        self.parser.add_argument(
+            "--update_freq", type=int, help="the frequency of updating camera height. This argument is valid only when --sparse_update is True"
+        )
         self.parser.add_argument(
             "--damping_update",
             action="store_true",
@@ -38,6 +50,9 @@ class MonodepthOptions:
         self.parser.add_argument("--start_with_cam_height_loss", action="store_true")  # TODO: this option is for debugging. remove this line.
         self.parser.add_argument("--warmup", action="store_true")
         self.parser.add_argument("--cam_height_loss_func", type=str, choices=["gaussian_nll_loss", "abs"], default="gaussian_nll_loss")
+        self.parser.add_argument(
+            "--rough_metric_loss_func", type=str, choices=["gaussian_nll_loss", "abs", "mean_after_abs"], default="gaussian_nll_loss"
+        )
         self.parser.add_argument("--kernel_size", help="kernel size for erosion", type=int, default=5)
         self.parser.add_argument("--random_seed", help="random seed", type=int)
         self.parser.add_argument("--annot_height", action="store_true", help="whether using KITTI height labels")
@@ -83,6 +98,7 @@ class MonodepthOptions:
         self.parser.add_argument(
             "--gradual_metric_scale_weight", action="store_true", help="whether increasing/decreasing fine/rough_metric_scale_weight gradually"
         )
+        self.parser.add_argument("--gradual_weight_func", default="linear", choices=["linear", "sigmoid"])
         self.parser.add_argument(
             "--gradual_limit_epoch",
             type=int,
