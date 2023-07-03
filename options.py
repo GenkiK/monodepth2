@@ -15,6 +15,7 @@ file_dir = os.path.dirname(__file__)  # the directory that options.py resides in
 class MonodepthOptions:
     def __init__(self):
         self.parser = argparse.ArgumentParser(description="Monodepthv2 options")
+        self.parser.add_argument("-n", "--dry_run", action="store_true")
         self.parser.add_argument("--local", action="store_true", help="whether training on local GPU or on server")
 
         # PATHS
@@ -22,6 +23,10 @@ class MonodepthOptions:
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "new_logs"))
 
         # TRAINING options
+        self.parser.add_argument("--use_median_cam_height", action="store_true", help="use median camera height as a representative value")
+        self.parser.add_argument("--use_median_scale", action="store_true", help="use median scale factor as a representative value")
+        self.parser.add_argument("--remove_outliers", action="store_true")
+        self.parser.add_argument("--outlier_relative_error_th", type=float, default=0.2)
         self.parser.add_argument(
             "--use_median_depth", action="store_true", help="use median depth over instances as an representative depth for calculating scale factor"
         )
@@ -153,7 +158,7 @@ class MonodepthOptions:
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda", help="if set disables CUDA", action="store_true")
-        self.parser.add_argument("--num_workers", type=int, help="number of dataloader workers", default=6)
+        self.parser.add_argument("--num_workers", type=int, help="number of dataloader workers", default=4)
 
         # LOADING options
         # self.parser.add_argument("--load_weights_folder", type=str, help="name of model to load")
