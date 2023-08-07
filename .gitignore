@@ -4,6 +4,7 @@ __pycache__
 *_disp.npy
 *.npz
 kitti_data
+cityscapes
 models
 venv/
 *.sif
