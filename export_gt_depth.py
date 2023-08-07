@@ -8,25 +8,22 @@ from __future__ import absolute_import, division, print_function
 
 import argparse
 import os
+from pathlib import Path
 
+import cv2
 import numpy as np
 import PIL.Image as pil
+from tqdm import tqdm
 
 from kitti_utils import generate_depth_map
 from utils import readlines
 
 
-def export_gt_depths_kitti():
-    parser = argparse.ArgumentParser(description="export_gt_depth")
-
-    parser.add_argument("--data_path", type=str, help="path to the root of the KITTI data", required=True)
-    parser.add_argument("--split", type=str, help="which split to export gt from", required=True, choices=["eigen", "eigen_benchmark"])
-    opt = parser.parse_args()
-
+def export_gt_depths_kitti(opt):
     split_folder = os.path.join(os.path.dirname(__file__), "splits", opt.split)
     lines = readlines(os.path.join(split_folder, "test_files.txt"))
 
-    print("Exporting ground truth depths for {}".format(opt.split))
+    print(f"Exporting ground truth depths for {opt.dataset}/{opt.split}")
 
     gt_depths = []
     for line in lines:
@@ -50,5 +47,31 @@ def export_gt_depths_kitti():
     np.savez_compressed(output_path, data=np.array(gt_depths, dtype=object))
 
 
+def export_gt_depths_cityscapes(opt):
+    split_folder = os.path.join(os.path.dirname(__file__), "splits")
+    print(f"Exporting ground truth depths for {opt.dataset}")
+    gt_depths = []
+    folder_path = opt.data_path
+    all_imgs = sorted(Path(folder_path).glob("**/*.png"))
+    for img_path in tqdm(all_imgs):
+        gt_depth = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+        gt_depth = cv2.resize(gt_depth, (1242, 375), cv2.INTER_AREA)
+        gt_depths.append(gt_depth.astype(np.float32))
+
+    output_path = os.path.join(split_folder, "gt_depths_cityscapes.npz")
+    print(f"Saving to {output_path}")
+    np.savez_compressed(output_path, data=np.array(gt_depths))
+
+
 if __name__ == "__main__":
-    export_gt_depths_kitti()
+    parser = argparse.ArgumentParser(description="export_gt_depth")
+
+    parser.add_argument("--dataset", type=str, default="kitti", choices=["kitti", "cityscapes"])
+    parser.add_argument("--data_path", type=str, help="path to the root of the KITTI data", required=True)
+    parser.add_argument("--split", type=str, help="which split to export gt from", choices=["eigen", "eigen_benchmark"])
+    opt = parser.parse_args()
+
+    if opt.dataset == "cityscapes":
+        export_gt_depths_cityscapes(opt)
+    else:
+        export_gt_depths_kitti(opt)

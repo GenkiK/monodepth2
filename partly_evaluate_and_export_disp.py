@@ -1,10 +1,6 @@
-# Copyright Niantic 2019. Patent Pending. All rights reserved.
-#
-# This software is licensed under the terms of the Monodepth2 license
-# which allows for non-commercial use only, the full terms of which are made
-# available in the LICENSE file.
+import warnings
 
-from __future__ import absolute_import, division, print_function
+warnings.filterwarnings("ignore")
 
 import os
 from pathlib import Path
@@ -19,6 +15,7 @@ from tqdm import tqdm
 
 import datasets
 import networks
+from eval_utils import batch_post_process_disparity, compute_errors, search_last_epoch
 from layers import disp_to_depth
 from options import MonodepthOptions
 
@@ -44,42 +41,10 @@ def pad_segms_labels(batch_segms, batch_labels):
     return padded_batch_segms, padded_batch_labels, n_insts
 
 
-def compute_errors(gt, pred):
-    """Computation of error metrics between predicted and ground truth depths"""
-    thresh = np.maximum((gt / pred), (pred / gt))
-    a1 = (thresh < 1.25).mean()
-    a2 = (thresh < 1.25**2).mean()
-    a3 = (thresh < 1.25**3).mean()
-
-    abse = np.mean(np.abs(gt - pred))
-
-    rmse = (gt - pred) ** 2
-    rmse = np.sqrt(rmse.mean())
-
-    rmse_log = (np.log(gt) - np.log(pred)) ** 2
-    rmse_log = np.sqrt(rmse_log.mean())
-
-    abs_rel = np.mean(np.abs(gt - pred) / gt)
-
-    sq_rel = np.mean(((gt - pred) ** 2) / gt)
-
-    return abse, abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
-
-
-# TODO: post_processはデフォルトで必要なのか調べる
-def batch_post_process_disparity(l_disp, r_disp):
-    """Apply the disparity post-processing method as introduced in Monodepthv1"""
-    _, h, w = l_disp.shape
-    m_disp = 0.5 * (l_disp + r_disp)
-    l, _ = np.meshgrid(np.linspace(0, 1, w), np.linspace(0, 1, h))
-    l_mask = (1.0 - np.clip(20 * (l - 0.05), 0, 1))[None, ...]
-    r_mask = l_mask[:, :, ::-1]
-    return r_mask * l_disp + l_mask * r_disp + (1.0 - l_mask - r_mask) * m_disp
-
-
 def evaluate_and_export_split_disp(opt):
     MIN_DEPTH = 1e-3
     MAX_DEPTH = 80
+    MAX_N_INST = 4
 
     log_path = (
         Path(opt.root_log_dir)
@@ -89,21 +54,19 @@ def evaluate_and_export_split_disp(opt):
     save_dir: Path = log_path / "result"
     print(f"All results are saved at {save_dir}")
 
-    max_n_inst = 4
-    pred_disps_split = [[] for _ in range(max_n_inst + 1)]
+    pred_disps_split = [[] for _ in range(MAX_N_INST + 1)]
 
-    if opt.disp_filename_to_eval is None:
+    models_dir = log_path / "models"
+    opt.epoch_for_eval = search_last_epoch(models_dir) if opt.epoch_for_eval is None else opt.epoch_for_eval
+    weights_dir = models_dir / f"weights_{opt.epoch_for_eval}"
+
+    if not opt.enable_loading_disp_to_eval:
         save_dir.mkdir(parents=False, exist_ok=True)
 
         if torch.cuda.is_available():
             device = torch.device("cuda")
         else:
             device = torch.device("cpu")
-
-        if opt.epoch_for_eval is None:
-            weights_dir = log_path / "models" / "best_weights"
-        else:
-            weights_dir = log_path / "models" / f"weights_{opt.epoch_for_eval}"
 
         with open(os.path.join(splits_dir, opt.eval_split, "test_files.txt")) as f:
             test_filenames = f.readlines()
@@ -147,9 +110,7 @@ def evaluate_and_export_split_disp(opt):
             collate_fn=collate_fn,
         )
 
-        # TODO: 順番に来るdispのインスタンス数を覚えとかないとgtとの対応が取れない
         n_insts = []
-
         pred_disps = []
 
         # PREDICTING ON EACH IMAGE IN TURN
@@ -157,7 +118,7 @@ def evaluate_and_export_split_disp(opt):
             for data in tqdm(dataloader, dynamic_ncols=True):
                 input_color = data[("color", 0, 0)].to(device)
                 n_inst = data["n_insts"]  # Size([16 (== batch_size)])
-                n_inst[n_inst > max_n_inst] = max_n_inst
+                n_inst[n_inst > MAX_N_INST] = MAX_N_INST  # MAX_N_INST個以上のインスタンスが登場するdispはまとめる
                 n_inst = n_inst.to(torch.uint8)
 
                 if opt.post_process:
@@ -177,64 +138,48 @@ def evaluate_and_export_split_disp(opt):
                 n_insts.append(n_inst)
         pred_disps = np.concatenate(pred_disps)
         n_insts = np.concatenate(n_insts)
-        for split in range(max_n_inst + 1):
+        for split in range(MAX_N_INST + 1):
             pred_disps_split[split] = pred_disps[n_insts == split]
 
-        #         # 4つ以上のインスタンスが登場するdispはまとめる
-        #         n_inst = n_insts[0] if n_insts[0] <= 4 else 4
-        #         n_inst_split.append(n_inst)
-        #         pred_disps_split[n_inst].append(pred_disp)
-
-        # for i in len(pred_disps_split):
-        #     pred_disps_split[i] = np.concatenate(pred_disps_split[i])
-
-        for split in range(max_n_inst + 1):
-            if split == max_n_inst:
-                disp_output_path = (
-                    save_dir / f"disps_{opt.eval_split}_split_{'best' if opt.epoch_for_eval is None else opt.epoch_for_eval}_more_inst.npy"
-                )
+        for split in range(MAX_N_INST + 1):
+            if split == MAX_N_INST:
+                disp_output_path = save_dir / f"disps_{opt.eval_split}_split_{opt.epoch_for_eval}_more_inst.npy"
             else:
-                disp_output_path = (
-                    save_dir / f"disps_{opt.eval_split}_split_{'best' if opt.epoch_for_eval is None else opt.epoch_for_eval}_{split}_inst.npy"
-                )
+                disp_output_path = save_dir / f"disps_{opt.eval_split}_split_{opt.epoch_for_eval}_{split}_inst.npy"
             print("-> Saving predicted disps to", disp_output_path)
             np.save(disp_output_path, pred_disps_split[split])
         np.save(save_dir / "n_insts.npy", n_insts)
 
     else:
         n_insts = np.load(save_dir / "n_insts.npy")
-        max_n_inst = n_insts.max()
-        for split in range(max_n_inst + 1):
-            if split == max_n_inst:
-                disp_output_path = (
-                    save_dir / f"disps_{opt.eval_split}_split_{'best' if opt.epoch_for_eval is None else opt.epoch_for_eval}_more_inst.npy"
-                )
+        MAX_N_INST = n_insts.max()
+        for split in range(MAX_N_INST + 1):
+            if split == MAX_N_INST:
+                disp_output_path = save_dir / f"disps_{opt.eval_split}_split_{opt.epoch_for_eval}_more_inst.npy"
             else:
-                disp_output_path = (
-                    save_dir / f"disps_{opt.eval_split}_split_{'best' if opt.epoch_for_eval is None else opt.epoch_for_eval}_{split}_inst.npy"
-                )
+                disp_output_path = save_dir / f"disps_{opt.eval_split}_split_{opt.epoch_for_eval}_{split}_inst.npy"
             print("-> Saving predicted disps to", disp_output_path)
             if not Path(disp_output_path).exists():
-                raise FileNotFoundError(f"{disp_output_path} does not exists. Please remove --disp_filename_to_eval option")
+                raise FileNotFoundError(f"{disp_output_path} does not exists. Please remove --enable_loading_disp_to_eval")
             print(f"\n-> Loading predictions from {disp_output_path}")
             pred_disps_split[split] = np.load(disp_output_path)
 
         if opt.eval_eigen_to_benchmark:
             eigen_to_benchmark_ids = np.load(splits_dir / "benchmark" / "eigen_to_benchmark_ids.npy")
-            for split in range(max_n_inst + 1):
+            for split in range(MAX_N_INST + 1):
                 pred_disps_split[split] = pred_disps_split[split][eigen_to_benchmark_ids]
 
     gt_path: Path = Path(splits_dir) / opt.eval_split / "gt_depths.npz"
     gt_depths = np.load(gt_path, fix_imports=True, encoding="latin1", allow_pickle=True)["data"]
-    gt_depths_split = [[] for _ in range(max_n_inst + 1)]
+    gt_depths_split = [[] for _ in range(MAX_N_INST + 1)]
     for i, n_inst in enumerate(n_insts):
         gt_depths_split[n_inst].append(gt_depths[i])
 
     print("-> Evaluating")
 
-    errors_split = [[] for _ in range(max_n_inst + 1)]
+    errors_split = [[] for _ in range(MAX_N_INST + 1)]
 
-    for split in range(max_n_inst + 1):
+    for split in range(MAX_N_INST + 1):
         pred_disps = pred_disps_split[split]
         gt_depths = gt_depths_split[split]
 
@@ -267,21 +212,30 @@ def evaluate_and_export_split_disp(opt):
 
             errors_split[split].append(compute_errors(gt_depth, pred_depth))
 
-    output_filename = f"result_{'best_model' if opt.epoch_for_eval is None else opt.epoch_for_eval}.txt"
+    output_filename = f"partly_result_{opt.epoch_for_eval}.txt"
+    mean_errors_split = np.array([np.array(errors_split[split]).mean(0) for split in range(MAX_N_INST + 1)])
+    n_n_insts = np.array([(n_insts == split).sum() for split in range(MAX_N_INST + 1)])
+    total_mean_errors = (mean_errors_split * n_n_insts[:, None]).sum(0) / n_n_insts.sum()
     with open(save_dir / output_filename, "w") as f:
         print("\t\t" + ("{:>8} | " * 8).format("abse", "abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
-        f.write("\t\t" + ("{:>8} | " * 8).format("abse", "abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
-        f.write("\n")
-        for split in range(max_n_inst + 1):
-            mean_errors = np.concatenate(errors_split[split:], axis=0).mean(0)
+        f.write("|          |" + ("{:>8} | " * 8).format("abse", "abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3") + "\n")
+        f.write("| - " * 9 + "|\n")
+        for split in range(MAX_N_INST + 1):
+            mean_errors = mean_errors_split[split]
 
-            print(f"=<{split} insts:\t", end="")
-            print(("&{: 8.3f}  " * 8).format(*mean_errors.tolist()) + "\\\\")
+            if split == MAX_N_INST:
+                print(f"{split}=< insts:\t", end="")
+                f.write(f"|{split}=< insts:")
+            else:
+                print(f"{split} insts:\t", end="")
+                f.write(f"|{split} insts:  ")
+            print(("|{: 8.3f}  " * 8).format(*mean_errors.tolist()) + "|")
+            f.write(("|{: 8.3f}  " * 8).format(*mean_errors.tolist()) + "|\n")
 
-            f.write(f"=<{split} insts:\t")
-            f.write(("&{: 8.3f}  " * 8).format(*mean_errors.tolist()) + "\\\\")
-            f.write("\n")
-
+        print("total:\t\t", end="")
+        print(("|{: 8.3f}  " * 8).format(*total_mean_errors.tolist()) + "|")
+        f.write("|total:    ")
+        f.write(("|{: 8.3f}  " * 8).format(*total_mean_errors.tolist()) + "|\n")
     print("\n-> Done!")
 
 

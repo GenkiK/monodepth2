@@ -24,6 +24,8 @@ splits_dir = os.path.join(os.path.dirname(__file__), "splits")
 def evaluate_and_export_disp(opt):
     MIN_DEPTH = 1e-3
     MAX_DEPTH = 80
+    ORIG_WIDTH = 2048
+    ORIG_HEIGHT = 1024
 
     log_path = (
         Path(opt.root_log_dir)
@@ -44,9 +46,6 @@ def evaluate_and_export_disp(opt):
         else:
             device = torch.device("cpu")
         print(f"Using device: {device}")
-
-        with open(os.path.join(splits_dir, opt.eval_split, "test_files.txt")) as f:
-            filenames = f.readlines()
 
         print("-> Loading model from ", weights_dir)
         encoder_path = weights_dir / "encoder.pth"
@@ -74,10 +73,16 @@ def evaluate_and_export_disp(opt):
         depth_decoder.to(device)
         depth_decoder.eval()
 
-        dataset = datasets.KITTIRAWDataset(opt.data_path, filenames, feed_height, feed_width, [0], 4, is_train=False)
+        dataset = datasets.CityscapesDataset(
+            data_path=Path(opt.data_path),
+            height=feed_height,
+            width=feed_width,
+            orig_height=ORIG_HEIGHT,
+            orig_width=ORIG_WIDTH,
+        )
         dataloader = DataLoader(
-            dataset,
-            16,
+            dataset=dataset,
+            batch_size=16,
             shuffle=False,
             num_workers=opt.num_workers,
             pin_memory=True,
@@ -88,8 +93,8 @@ def evaluate_and_export_disp(opt):
 
         # PREDICTING ON EACH IMAGE IN TURN
         with torch.no_grad():
-            for data in tqdm(dataloader, dynamic_ncols=True):
-                input_color = data[("color", 0, 0)].to(device)
+            for input_color in tqdm(dataloader, dynamic_ncols=True):
+                input_color = input_color.to(device)
 
                 if opt.post_process:
                     # Post-processed results require each image to have two forward passes
@@ -107,22 +112,18 @@ def evaluate_and_export_disp(opt):
                 pred_disps.append(pred_disp)
         pred_disps = np.concatenate(pred_disps)
 
-        disp_output_path = save_dir / f"disps_{opt.eval_split}_split_{opt.epoch_for_eval}.npy"
+        disp_output_path = save_dir / f"disps_cityscapes_{opt.epoch_for_eval}.npy"
         print("-> Saving predicted disps to", disp_output_path)
         np.save(disp_output_path, pred_disps)
 
     else:
-        disp_output_path = save_dir / f"disps_{opt.eval_split}_split_{opt.epoch_for_eval}.npy"
+        disp_output_path = save_dir / f"disps_cityscapes_{opt.epoch_for_eval}.npy"
         if not Path(disp_output_path).exists():
             raise FileNotFoundError(f"{disp_output_path} does not exists. Please remove --enable_loading_disp_to_eval option")
         print(f"\n-> Loading predictions from {disp_output_path}")
         pred_disps = np.load(disp_output_path)
 
-        if opt.eval_eigen_to_benchmark:
-            eigen_to_benchmark_ids = np.load(splits_dir / "benchmark" / "eigen_to_benchmark_ids.npy")
-            pred_disps = pred_disps[eigen_to_benchmark_ids]
-
-    gt_path: Path = Path(splits_dir) / opt.eval_split / "gt_depths.npz"
+    gt_path: Path = Path(splits_dir) / "gt_depths_cityscapes.npz"
     gt_depths = np.load(gt_path, fix_imports=True, encoding="latin1", allow_pickle=True)["data"]
 
     print("-> Evaluating")
@@ -133,28 +134,22 @@ def evaluate_and_export_disp(opt):
 
     for i in range(pred_disps.shape[0]):
         gt_depth = gt_depths[i]
+        # https://github.com/mcordts/cityscapesScripts/issues/55#issuecomment-411486510
+        gt_depth[gt_depth > 0] = (gt_depth[gt_depth > 0] - 1) / 256
+        gt_depth[gt_depth > 0] = (0.209313 * 2262.52) / gt_depth[gt_depth > 0]
+        gt_depth[gt_depth > MAX_DEPTH] = 0
         gt_height, gt_width = gt_depth.shape[:2]
 
         pred_disp = pred_disps[i]
         pred_disp = cv2.resize(pred_disp, (gt_width, gt_height))
         pred_depth = 1 / pred_disp
-
-        if opt.eval_split == "eigen":
-            mask = np.logical_and(gt_depth > MIN_DEPTH, gt_depth < MAX_DEPTH)
-
-            crop = np.array([0.40810811 * gt_height, 0.99189189 * gt_height, 0.03594771 * gt_width, 0.96405229 * gt_width]).astype(np.int32)
-            crop_mask = np.zeros(mask.shape)
-            crop_mask[crop[0] : crop[1], crop[2] : crop[3]] = 1
-            mask = np.logical_and(mask, crop_mask)
-
-        else:
-            mask = gt_depth > 0
-
+        mask = np.logical_and(gt_depth > MIN_DEPTH, gt_depth < MAX_DEPTH)
+        crop = np.array([0.05 * gt_height, 0.80 * gt_height, 0.05 * gt_width, 0.99 * gt_width]).astype(np.int32)
+        crop_mask = np.zeros(mask.shape)
+        crop_mask[crop[0] : crop[1], crop[2] : crop[3]] = 1
+        mask = np.logical_and(mask, crop_mask)
         pred_depth = pred_depth[mask]
         gt_depth = gt_depth[mask]
-
-        pred_depth *= opt.pred_depth_scale_factor
-        # if not opt.disable_median_scaling:
         ratio = np.median(gt_depth) / np.median(pred_depth)
         ratios.append(ratio)
         scaled_pred_depth = pred_depth * ratio
@@ -196,7 +191,5 @@ def evaluate_and_export_disp(opt):
 
 
 if __name__ == "__main__":
-    # args = parse_args()
-    # export_disp(args)
     options = MonodepthOptions()
     evaluate_and_export_disp(options.parse())
