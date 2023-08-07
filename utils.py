@@ -37,6 +37,35 @@ def sigmoid(x: int | float) -> float:
     return 1 / (1 + exp(-x))
 
 
+def calc_projected_heights(
+    segms: torch.Tensor, road_normal_neg: torch.Tensor, cam_pts: torch.Tensor, unscaled_cam_height: torch.float32, from_ground: bool = False
+) -> torch.Tensor:
+    """
+    segms: [n_inst, h, w], cuda
+    road_normal_neg: [3], cuda
+    cam_pts: [h, w, 3], cuda
+    cam_height: torch.float32
+    """
+    device = segms.device
+    n_inst = segms.shape[0]
+    nx, ny, _ = road_normal_neg
+    origin = torch.tensor((0, unscaled_cam_height / ny, 0), dtype=torch.float32, device=device)
+    root = torch.sqrt(ny**2 / (nx**2 + ny**2))
+    x_basis = torch.tensor((root, -nx / ny * root, 0), dtype=torch.float32, device=device)
+    z_basis = torch.cross(x_basis, road_normal_neg)
+    projected_cam_pts = cam_pts - z_basis[None, None, :] * (cam_pts @ z_basis).unsqueeze(-1)
+    projected_cam_pts -= origin[None, None, :]
+    ys = projected_cam_pts @ road_normal_neg
+    projected_heights = torch.zeros((n_inst,), dtype=torch.float32, device=device)
+    if from_ground:
+        for idx in range(n_inst):
+            projected_heights[idx] = -ys[segms[idx]].min()
+    else:
+        for idx in range(n_inst):
+            projected_heights[idx] = ys[segms[idx]].max() - ys[segms[idx]].min()
+    return projected_heights
+
+
 def calc_obj_pix_height_over_dist_to_horizon(
     # HACK: 道路がない画像のインスタンスのratioは0にしてる（＝取り除かない）けど，OK?
     homo_pix_grid: torch.Tensor,
@@ -149,12 +178,24 @@ def horizon_to_2pts(horizons: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
     )
 
 
+# この方法では１つのインスタンスが分かれている時に隙間の部分が考慮されない
+# def masks_to_pix_heights(masks: torch.Tensor) -> torch.Tensor:
+#     """
+#     masks: Size(n_inst, img_h, img_w)
+#     """
+#     # 画像の行方向に論理和を取ったものの列方向の総和はピクセル高さ
+#     return (masks.sum(2) > 0).sum(1)
+
+
 def masks_to_pix_heights(masks: torch.Tensor) -> torch.Tensor:
     """
     masks: Size(n_inst, img_h, img_w)
     """
-    # 画像の行方向に論理和を取ったものの列方向の総和はピクセル高さ
-    return (masks.sum(2) > 0).sum(1)
+    pix_heights = torch.zeros((masks.shape[0],), device=masks.device, dtype=torch.int16)
+    for idx, mask in enumerate(masks):
+        y, _ = torch.where(mask != 0)
+        pix_heights[idx] = torch.max(y) - torch.min(y)
+    return pix_heights
 
 
 def argmax_3d(arr: torch.Tensor) -> torch.Tensor:
@@ -163,10 +204,10 @@ def argmax_3d(arr: torch.Tensor) -> torch.Tensor:
     return torch.stack([max_idxs // width, max_idxs % width], -1)
 
 
-# def generate_cam_grid(h: int, w: int, invK: torch.Tensor) -> torch.Tensor:
-#     x_pix, y_pix = torch.meshgrid(torch.arange(w), torch.arange(h), indexing="xy")
-#     pix_grid = torch.stack((x_pix, y_pix, torch.ones((h, w))))  # [3,h,w] ([:,x,y]がpixel x, yにおけるhomogeneous vector)
-#     return (invK[:3, :3] @ pix_grid.reshape(3, -1)).reshape(3, h, w)
+def generate_cam_grid(h: int, w: int, invK: torch.Tensor) -> torch.Tensor:
+    x_pix, y_pix = torch.meshgrid(torch.arange(w), torch.arange(h), indexing="xy")
+    pix_grid = torch.stack((x_pix, y_pix, torch.ones((h, w))))  # [3,h,w] ([:,x,y]がpixel x, yにおけるhomogeneous vector)
+    return (invK[:3, :3] @ pix_grid.reshape(3, -1)).reshape(3, h, w)
 
 
 def generate_homo_pix_grid(h: int, w: int) -> torch.Tensor:
@@ -189,6 +230,15 @@ def cam_pts2cam_heights(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch
     return A @ normal
 
 
+def cam_pts2cam_heights_with_normal(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tensor:
+    A = cam_pts[road_mask == 1]
+    pinvs = torch.pinverse(A.detach())
+    ones = torch.ones((A.shape[0], 1), device=A.device).type_as(A)
+    normal = pinvs @ ones
+    normal = normal / torch.linalg.norm(normal)
+    return A @ normal, normal
+
+
 def cam_pts2normal(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tensor:
     A = cam_pts[road_mask == 1]
     pinvs = torch.pinverse(A.detach())
@@ -198,15 +248,109 @@ def cam_pts2normal(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tens
     return normal
 
 
-# def cam_pts2cam_heights(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tensor:
-#     A = cam_pts[road_mask == 1].contiguous()
-#     # ones = torch.ones((A.shape[0], 1), dtype=torch.float32, device=A.device)
-#     ones = torch.ones((A.shape[0], 1), device=A.device).type_as(A)
-#     A_T = A.T
-#     normal = torch.linalg.pinv(A_T @ A) @ A_T @ ones
-#     # normal = torch.pinverse(A) @ ones
-#     normal = normal / torch.linalg.norm(normal)
-#     return A @ normal
+def cam_pts2cam_height_with_cross_prod(batch_cam_pts: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    # batch_cam_pts: [bs, h, w, 3]
+    v0 = batch_cam_pts.roll(-1, dims=2) - batch_cam_pts  # 右横の点を左に移動させる
+    v1 = batch_cam_pts.roll((1, -1), dims=(1, 2)) - batch_cam_pts
+    v2 = batch_cam_pts.roll(1, dims=1) - batch_cam_pts
+    v3 = batch_cam_pts.roll((1, 1), dims=(1, 2)) - batch_cam_pts
+    v4 = batch_cam_pts.roll(1, dims=2) - batch_cam_pts
+    v5 = batch_cam_pts.roll((-1, 1), dims=(1, 2)) - batch_cam_pts
+    v6 = batch_cam_pts.roll(-1, dims=1) - batch_cam_pts
+    v7 = batch_cam_pts.roll((-1, -1), dims=(1, 2)) - batch_cam_pts
+
+    normal_sum = torch.zeros_like(batch_cam_pts, device=batch_cam_pts.device)
+    vecs = (v0, v1, v1, v2, v3, v4, v5, v6, v7)
+    for i in range(8):
+        if i + 2 < 8:
+            normal_sum += torch.cross(vecs[i], vecs[i + 2], dim=-1)
+        else:
+            normal_sum += torch.cross(vecs[i], vecs[i + 2 - 8], dim=-1)
+    batch_normal = normal_sum / torch.linalg.norm(normal_sum, dim=-1).unsqueeze(-1)  # [bs, h, w, 3]
+    batch_cam_height = torch.einsum("ijkl,ijkl->ijk", batch_cam_pts, -batch_normal)  # [bs, h, w]
+    return batch_cam_height, batch_normal
+
+
+def weighted_quantile(arr: torch.Tensor, weights: torch.Tensor, q=0.5):
+    # arr: 1D tensor
+    # weights: 1D tensor
+    non_zeros = weights > 0
+    arr = arr[non_zeros]
+    weights = weights[non_zeros]
+    if arr.shape[0] == 0:
+        return torch.nan
+    idxs = torch.argsort(arr)
+    cum = torch.cumsum(weights[idxs], dim=0)
+    q_idx = torch.searchsorted(cum, q * cum[-1])
+    if q_idx == idxs.shape[0] - 1:
+        return arr[idxs[q_idx]]
+    return torch.where(cum[q_idx] / cum[-1] == q, (arr[idxs[q_idx]] + arr[idxs[q_idx + 1]]) / 2, arr[idxs[q_idx]])
+
+
+def quantile_wo_zeros(arr: torch.Tensor, weights: torch.Tensor, q=0.5):
+    # arr: 1D tensor
+    # weights: 1D tensor
+    non_zero_bools = weights > 0
+    arr_wo_zeros = arr[non_zero_bools]
+    if arr_wo_zeros.shape[0] == 0:
+        return torch.nan
+    return arr_wo_zeros.quantile(q)
+
+
+# def cam_pts2cam_height_with_long_range(batch_cam_pts: torch.Tensor, n_sample: int, batch_road: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+#     # batch_cam_pts: [bs, h, w, 3]
+#     # ランダムに２つのインデックスを各点ごとにサンプリングしてきてその後方向チェック
+#     # 片方のベクトルを基準にした時，もう片方のベクトルが180度以内にあれば基準のベクトルが親指に対応．
+#     bs, h, w, _ = batch_cam_pts.shape
+#     arange_bs = torch.arange(bs)
+#     device = batch_cam_pts.device
+#     n_pixel = h * w
+#     # n_sample = int(n_pixel * sample_ratio)
+#     # [bs, h, w, n_sample, 2(A,B), 2(x,y)]
+
+#     x_pix, y_pix = torch.meshgrid(torch.arange(w), torch.arange(h), indexing="xy")
+#     pix_grid = torch.stack((y_pix.to(device), x_pix.to(device)), dim=-1)[None, :, :, None, None, :]  # [1, h, w, 1, 1, 2]
+#     y_idxs = torch.multinomial(torch.ones(h, device=device), bs * n_pixel * n_sample * 2, replacement=True).view(bs, h, w, n_sample, 2)
+#     x_idxs = torch.multinomial(torch.ones(w, device=device), bs * n_pixel * n_sample * 2, replacement=True).view(bs, h, w, n_sample, 2)
+#     group_idxs = torch.stack((y_idxs, x_idxs), dim=-1)  # [bs, h, w, n_sample, 2(A,B), 2(y,x)]
+
+#     # A, Bの並び替え
+#     ## argsortのようにgroup_idxsのidxsを作ってgroup_idxs[idxs]とするイメージ.
+#     ## [:, :, :, :, (0,1) or (1,0), :] (:の部分はnp.arange(xxx))
+#     ## ２次元ベクトルの外積＝determinant
+#     group_idxs_idxs = torch.where(
+#         torch.det(group_idxs.float() - pix_grid.float()).unsqueeze(-1) > 0,  # [bs, h, w, n_sample, 1]
+#         torch.tensor([0, 1], dtype=torch.long, device=device),
+#         torch.tensor([1, 0], dtype=torch.long, device=device),
+#     )  # [bs, h, w, n_sample, 2]
+#     group_idxs = torch.gather(group_idxs, -2, group_idxs_idxs[..., None].expand(-1, -1, -1, -1, -1, 2))
+
+#     # TODO: あとで１つの式にまとめる
+#     batch_cam_pts_flatten = batch_cam_pts.view(bs, n_pixel, 3)  # [bs, h*w, 3]
+#     group_idxs = group_idxs[..., 0] * w + group_idxs[..., 1]  # [bs, h, w, n_sample, 2]
+#     group_idxs = group_idxs.flatten(start_dim=1)  # [bs, h*w*n_sample*2]
+#     group_cam_pts = batch_cam_pts_flatten[arange_bs[:, None], group_idxs, :]  # [bs, h*w*n_sample*2, 3]
+#     group_cam_pts = group_cam_pts.view(bs, h, w, n_sample, 2, 3)
+
+#     # TODO: 近すぎるsample点を排除する
+
+#     # 共線のサンプルの外積値は0のはず
+#     sample_normals = torch.cross(group_cam_pts[..., 0, :], group_cam_pts[..., 1, :], dim=-1)  # [bs, h, w, n_sample, 3]
+
+#     # そもそも道路マスク内にあるかチェック
+#     # group_idxs: [bs, (h * w * n_sample * 2), 2]
+#     # mask = batch_road[arange_bs.unsqueeze(1), group_idxs[..., 0], group_idxs[..., 1]].view(bs, h, w, n_sample, 2)
+#     # batch_road: [bs, h, w]
+#     # group_idxs: [bs, h, w, n_sample, 2, 2]
+#     # mask = torch.gather(batch_road[..., None, None, None].expand(-1, -1, -1, n_sample, 2, 2), dim=)
+
+#     batch_road_flatten = batch_road.view(bs, n_pixel)
+#     mask = batch_road_flatten[arange_bs[:, None], group_idxs].view(bs, h, w, n_sample, 2)
+#     sample_mask = torch.all(mask, dim=-1) * (torch.norm(sample_normals.detach(), dim=-1) != 0.0)  # [bs, h, w, n_sample]
+#     batch_normal = (sample_normals * sample_mask.unsqueeze(-1)).sum(3)  # [bs, h, w, 3]
+#     batch_normal /= torch.linalg.norm(batch_normal, dim=-1).unsqueeze(-1)  # normの計算時にはmask外のピクセルで計算されたnormalも含まれている
+#     batch_cam_height = torch.einsum("ijkl,ijkl->ijk", batch_cam_pts, -batch_normal)
+#     return batch_cam_height, batch_normal
 
 
 # def cam_pts2cam_heights(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tensor:
@@ -220,14 +364,6 @@ def cam_pts2normal(cam_pts: torch.Tensor, road_mask: torch.Tensor) -> torch.Tens
 #     # TODO: ↑これを確認  torch.autograd.gradcheck(lambda a, b: torch.linalg.pinv(a @ b.t()), [x, y])
 #     normal = normal / torch.linalg.norm(normal)
 #     return road_pts @ normal
-
-
-# def cam_pts2cam_heights(masked_cam_pts: torch.Tensor) -> torch.Tensor:
-#     # masked_cam_pts: [?, 3]
-#     ones = torch.ones((masked_cam_pts.shape[0], 1), dtype=torch.float32, device=masked_cam_pts.device)
-#     normal = torch.pinverse(masked_cam_pts) @ ones
-#     normal = normal / torch.norm(normal)
-#     return masked_cam_pts @ normal
 
 
 def erode(batch_segms: torch.Tensor, kernel_size: int) -> torch.Tensor:

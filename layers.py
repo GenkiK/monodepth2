@@ -175,9 +175,7 @@ class Project3D(nn.Module):
 
     def forward(self, points, K, T):
         P = torch.matmul(K, T)[:, :3, :]
-
         cam_points = torch.matmul(P, points)
-
         pix_coords = cam_points[:, :2, :] / (cam_points[:, 2, :].unsqueeze(1) + self.eps)
         pix_coords = pix_coords.view(self.batch_size, 2, self.height, self.width)
         pix_coords = pix_coords.permute(0, 2, 3, 1)

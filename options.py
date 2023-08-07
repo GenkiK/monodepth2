@@ -23,8 +23,15 @@ class MonodepthOptions:
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "new_logs"))
 
         # TRAINING options
+        self.parser.add_argument("--with_normal_loss", action="store_true")
+        self.parser.add_argument("--gradual_normal_weight", action="store_true")
+        self.parser.add_argument(
+            "--normal_with_8_neighbors", action="store_true", help="when computing road normal, using 8-neighbors method, not pinverse"
+        )
+        self.parser.add_argument("--disable_road_masking", action="store_true", help="disable automasking only in the road region")
         self.parser.add_argument("--use_median_cam_height", action="store_true", help="use median camera height as a representative value")
         self.parser.add_argument("--use_median_scale", action="store_true", help="use median scale factor as a representative value")
+        self.parser.add_argument("--soft_remove_outliers", action="store_true")
         self.parser.add_argument("--remove_outliers", action="store_true")
         self.parser.add_argument("--outlier_relative_error_th", type=float, default=0.2)
         self.parser.add_argument(
@@ -182,7 +189,8 @@ class MonodepthOptions:
         self.parser.add_argument("--disable_median_scaling", help="if set disables median scaling in evaluation", action="store_true")
         self.parser.add_argument("--pred_depth_scale_factor", help="if set multiplies predictions by this number", type=float, default=1)
         # self.parser.add_argument("--ext_disp_to_eval", type=str, help="optional path to a .npy disparities file to evaluate")
-        self.parser.add_argument("--disp_filename_to_eval", type=str, help=".npy disparity filename to evaluate")
+        # self.parser.add_argument("--disp_filename_to_eval", type=str, help=".npy disparity filename to evaluate")
+        self.parser.add_argument("--enable_loading_disp_to_eval", action="store_true")
         self.parser.add_argument(
             "--eval_split",
             type=str,
