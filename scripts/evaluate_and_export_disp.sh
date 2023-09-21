@@ -12,6 +12,9 @@ CUDA_VISIBLE_DEVICES=$DEVICE python -OO $ROOT_DIR/evaluate_and_export_disp.py --
 CUDA_VISIBLE_DEVICES=$DEVICE python -OO $ROOT_DIR/evaluate_and_export_disp.py --model_name person_car_annot_height_bs8_wo_scale_dividing_quartile_depth_median_cam_height_median_scale_wo_1st_update_update_freq5_remove_outliers0.2_abs_mean_after_abs_gradual_hybrid0.01_1 --ckpt_timestamp "07-03-12:00" --height 320 --width 1024 --epoch_for_eval $EPOCH --enable_loading_disp_to_eval
 CUDA_VISIBLE_DEVICES=$DEVICE python -OO $ROOT_DIR/evaluate_and_export_disp.py --model_name person_car_annot_height_bs8_wo_scale_dividing_quartile_depth_median_cam_height_median_scale_wo_1st_update_update_freq3_remove_outliers0.2_disable_road_masking_abs_mean_after_abs_gradual_hybrid0.01_1 --ckpt_timestamp "07-06-17:57" --height 320 --width 1024 --epoch_for_eval $EPOCH --enable_loading_disp_to_eval
 
+
+
+
 # CUDA_VISIBLE_DEVICES=$DEVICE python -OO $ROOT_DIR/evaluate_and_export_disp.py --model_name person_car_with_outliers --ckpt_timestamp "05-10-10:48" --height 320 --width 1024
 # CUDA_VISIBLE_DEVICES=$DEVICE python -OO $ROOT_DIR/evaluate_and_export_disp.py --model_name person_car_annot_height_offset4_th06_min_inst10_rough01 --ckpt_timestamp "05-10-11:08" --height 320 --width 1024
 # CUDA_VISIBLE_DEVICES=$DEVICE python -OO $ROOT_DIR/evaluate_and_export_disp.py --model_name person_car_annot_height_offset4_th06_min_inst10_rough05 --ckpt_timestamp "05-10-10:48" --height 320 --width 1024

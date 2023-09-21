@@ -9,7 +9,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.nn.utils import rnn
@@ -77,11 +76,6 @@ class TrainerWithSegm:
 
         assert self.opt.adj_frame_idxs[0] == 0, "adj_frame_idxs must start with 0"
 
-        self.use_pose_net = not (self.opt.use_stereo and self.opt.adj_frame_idxs == [0])
-
-        if self.opt.use_stereo:
-            self.opt.adj_frame_idxs.append("s")
-
         self.models["encoder"] = networks.ResnetEncoder(self.opt.num_layers, self.opt.weights_init == "pretrained" and not can_resume)
         self.models["encoder"].to(self.device)
         self.parameters_to_train += list(self.models["encoder"].parameters())
@@ -90,38 +84,24 @@ class TrainerWithSegm:
         self.models["depth"].to(self.device)
         self.parameters_to_train += list(self.models["depth"].parameters())
 
-        if self.use_pose_net:
-            if self.opt.pose_model_type == "separate_resnet":
-                self.models["pose_encoder"] = networks.ResnetEncoder(
-                    self.opt.num_layers, self.opt.weights_init == "pretrained" and not can_resume, num_input_images=self.num_pose_frames
-                )
-
-                self.models["pose_encoder"].to(self.device)
-                self.parameters_to_train += list(self.models["pose_encoder"].parameters())
-
-                self.models["pose"] = networks.PoseDecoder(self.models["pose_encoder"].num_ch_enc, num_input_features=1, num_frames_to_predict_for=2)
-
-            elif self.opt.pose_model_type == "shared":
-                self.models["pose"] = networks.PoseDecoder(self.models["encoder"].num_ch_enc, self.num_pose_frames)
-
-            elif self.opt.pose_model_type == "posecnn":
-                self.models["pose"] = networks.PoseCNN(self.num_input_frames if self.opt.pose_model_input == "all" else 2)
-
-            self.models["pose"].to(self.device)
-            self.parameters_to_train += list(self.models["pose"].parameters())
-
-        if self.opt.predictive_mask:
-            assert self.opt.disable_automasking, "When using predictive_mask, please disable automasking with --disable_automasking"
-
-            # Our implementation of the predictive masking baseline has the the same architecture
-            # as our depth decoder. We predict a separate mask for each source frame.
-            self.models["predictive_mask"] = networks.DepthDecoder(
-                self.models["encoder"].num_ch_enc,
-                self.opt.scales,
-                num_output_channels=(len(self.opt.adj_frame_idxs) - 1),
+        if self.opt.pose_model_type == "separate_resnet":
+            self.models["pose_encoder"] = networks.ResnetEncoder(
+                self.opt.num_layers, self.opt.weights_init == "pretrained" and not can_resume, num_input_images=self.num_pose_frames
             )
-            self.models["predictive_mask"].to(self.device)
-            self.parameters_to_train += list(self.models["predictive_mask"].parameters())
+
+            self.models["pose_encoder"].to(self.device)
+            self.parameters_to_train += list(self.models["pose_encoder"].parameters())
+
+            self.models["pose"] = networks.PoseDecoder(self.models["pose_encoder"].num_ch_enc, num_input_features=1, num_frames_to_predict_for=2)
+
+        elif self.opt.pose_model_type == "shared":
+            self.models["pose"] = networks.PoseDecoder(self.models["encoder"].num_ch_enc, self.num_pose_frames)
+
+        elif self.opt.pose_model_type == "posecnn":
+            self.models["pose"] = networks.PoseCNN(self.num_input_frames if self.opt.pose_model_input == "all" else 2)
+
+        self.models["pose"].to(self.device)
+        self.parameters_to_train += list(self.models["pose"].parameters())
 
         self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
         self.epoch = 0
@@ -129,15 +109,20 @@ class TrainerWithSegm:
             if self.opt.last_epoch_for_resume is None:
                 weights_dir, self.epoch = self.search_last_epoch()
             else:
+                weights_dir = Path(self.log_path) / "models" / f"weights_{self.opt.last_epoch_for_resume}"
                 self.epoch = self.opt.last_epoch_for_resume
-                weights_dir = Path(self.log_path) / "models" / f"weights_{self.epoch}"
             self.epoch += 1
             self.load_model(weights_dir)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(self.model_optimizer, self.opt.scheduler_step_size, 0.1)
         self.model_lr_scheduler.last_epoch = self.epoch - 1
 
         print("Training model named:  ", self.opt.model_name)
-        print("Models and tensorboard events files are saved to:\n  ", self.log_path)
+        if self.opt.dry_run:
+            print("\n=====================================================================================\n")
+            print("          This is dry-run mode, so no data will be saved               ")
+            print("\n=====================================================================================\n")
+        else:
+            print("Models and tensorboard events files are saved to:\n  ", self.log_path)
         print("Training is using:  ", self.device)
 
         # data
@@ -145,6 +130,10 @@ class TrainerWithSegm:
         fpath = os.path.join(os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt")
         train_filenames = readlines(fpath.format("train"))
         val_filenames = readlines(fpath.format("val"))
+        if self.opt.dry_run:
+            n_img = self.opt.batch_size * 2
+            train_filenames = train_filenames[:n_img]
+            val_filenames = val_filenames[:n_img]
         img_ext = ".png" if self.opt.png else ".jpg"
 
         num_train_samples = len(train_filenames)
@@ -191,9 +180,10 @@ class TrainerWithSegm:
             drop_last=True,
             collate_fn=collate_fn,
         )
-        self.writers = {}
-        for mode in ["train", "val"]:
-            self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
+        if not self.opt.dry_run:
+            self.writers = {}
+            for mode in ["train", "val"]:
+                self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
 
         if not self.opt.no_ssim:
             self.ssim = SSIM()
@@ -233,8 +223,8 @@ class TrainerWithSegm:
             self.height_priors = TrainerWithSegm.read_height_priors(self.opt.data_path)
             print("\nUsing calculated object height.\n")
         self.height_priors = self.height_priors.to(self.device)
-
-        self.save_opts()
+        if not self.opt.dry_run:
+            self.save_opts()
 
     @staticmethod
     def read_height_priors(root_dir: str) -> torch.Tensor:
@@ -263,11 +253,12 @@ class TrainerWithSegm:
             self.train_epoch()
             val_loss_dict = self.val_epoch()
             val_loss = val_loss_dict[self.standard_metric]
-            if (lower_is_better and val_loss < th_best) or (not lower_is_better and val_loss > th_best):
-                self.save_model(is_best=True)
-                th_best = val_loss
-            else:
-                self.save_model(is_best=False)
+            if not self.opt.dry_run:
+                if (lower_is_better and val_loss < th_best) or (not lower_is_better and val_loss > th_best):
+                    self.save_model(is_best=True)
+                    th_best = val_loss
+                else:
+                    self.save_model(is_best=False)
 
     def train_epoch(self):
         """Run a single epoch of training and validation"""
@@ -295,7 +286,8 @@ class TrainerWithSegm:
 
                 if "depth_gt" in batch_input_dict:
                     self.compute_depth_losses(batch_input_dict, batch_output_dict, loss_dict)
-                self.log_train(batch_input_dict, batch_output_dict, loss_dict)
+                if not self.opt.dry_run:
+                    self.log_train(batch_input_dict, batch_output_dict, loss_dict)
             del loss_dict
             torch.cuda.empty_cache()
             self.step += 1
@@ -318,12 +310,7 @@ class TrainerWithSegm:
             # Otherwise, we only feed the image with adj_frame_idx 0 through the depth encoder
             features = self.models["encoder"](input_dict["color_aug", 0, 0])
             output_dict = self.models["depth"](features)
-
-        if self.opt.predictive_mask:
-            output_dict["predictive_mask"] = self.models["predictive_mask"](features)
-
-        if self.use_pose_net:
-            output_dict.update(self.predict_poses(input_dict, features))
+        output_dict.update(self.predict_poses(input_dict, features))
 
         self.generate_images_pred(input_dict, output_dict)
         loss_dict = self.compute_losses(input_dict, output_dict)
@@ -381,7 +368,6 @@ class TrainerWithSegm:
                     output_dict[("axisangle", 0, f_i)] = axisangle
                     output_dict[("translation", 0, f_i)] = translation
                     output_dict[("cam_T_cam", 0, f_i)] = transformation_from_parameters(axisangle[:, i], translation[:, i])
-
         return output_dict
 
     def val_epoch(self):
@@ -403,20 +389,20 @@ class TrainerWithSegm:
             n_iter = len(self.val_loader)
             for loss_name in avg_loss_dict:
                 avg_loss_dict[loss_name] /= n_iter
-            self.log_val(avg_loss_dict)
+            if not self.opt.dry_run:
+                self.log_val(avg_loss_dict)
             return avg_loss_dict
 
     def generate_images_pred(self, input_dict, output_dict):
         """Generate the warped (reprojected) color images for a minibatch.
         Generated images are saved into the `outputs` dictionary.
         """
+        source_scale = 0
         for scale in self.opt.scales:
             disp = output_dict[("disp", scale)]
             disp = F.interpolate(disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
-            source_scale = 0
 
             _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
-
             output_dict[("depth", scale)] = depth
 
             cam_points = self.backproject_depth[source_scale](depth, input_dict[("inv_K", source_scale)])
@@ -476,22 +462,19 @@ class TrainerWithSegm:
             batch_segms: torch.Tensor = input_dict["padded_segms"]
             batch_labels: torch.Tensor = input_dict["padded_labels"]
             fy: float = input_dict[("K", source_scale)][0, 1, 1]
+            # segms_flat = batch_segms.view(-1, h, w)
+            # non_padded_channels = segms_flat.sum((1, 2)) > 0
+            # n_inst_appear_frames = non_padded_channels.sum()
+            # segms_flat = segms_flat[non_padded_channels]
+            # labels_flat = batch_labels.view(-1)[non_padded_channels].long()
+            segms_flat, obj_pix_heights, obj_height_expects, obj_height_vars = self.make_flats(batch_segms, batch_labels)
 
-            _, _, h, w = batch_segms.shape
-            segms_flat = batch_segms.view(-1, h, w)
-            non_padded_channels = segms_flat.sum((1, 2)) > 0
-            n_inst_appear_frames = non_padded_channels.sum()
-            segms_flat = segms_flat[non_padded_channels]
-            labels_flat = batch_labels.view(-1)[non_padded_channels].long()
-
-            height_expects = self.height_priors[labels_flat, 0]
-            height_vars = self.height_priors[labels_flat, 1]
-            obj_pix_heights = masks_to_pix_heights(segms_flat)
         for scale in self.opt.scales:
             loss = 0.0
             reprojection_losses = []
             batch_disp: torch.Tensor = output_dict[("disp", scale)]
             batch_upscaled_depth: torch.Tensor = output_dict[("depth", scale)].squeeze(1)
+            depth_repeat = batch_upscaled_depth.repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
             batch_color: torch.Tensor = input_dict[("color", 0, scale)]
 
             for adj_frame_idx in self.opt.adj_frame_idxs[1:]:
@@ -514,17 +497,6 @@ class TrainerWithSegm:
                     # save both images, and do min all at once below
                     identity_reprojection_loss = identity_reprojection_losses
 
-            elif self.opt.predictive_mask:
-                # use the predicted mask
-                mask = output_dict["predictive_mask"]["disp", scale]
-                mask = F.interpolate(mask, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
-
-                reprojection_losses *= mask
-
-                # add a loss pushing mask to 1 (using nn.BCELoss for stability)
-                weighting_loss = 0.2 * nn.BCELoss()(mask, torch.ones(mask.shape).cuda())
-                loss += weighting_loss.mean()
-
             if self.opt.avg_reprojection:
                 reprojection_loss = reprojection_losses.mean(1, keepdim=True)
             else:
@@ -534,18 +506,18 @@ class TrainerWithSegm:
                 # add random numbers to break ties
                 identity_reprojection_loss += torch.randn(identity_reprojection_loss.shape, device=self.device) * 0.00001
 
-                combined = torch.cat((identity_reprojection_loss, reprojection_loss), dim=1)
+                combined_loss = torch.cat((identity_reprojection_loss, reprojection_loss), dim=1)
             else:
-                combined = reprojection_loss
+                combined_loss = reprojection_loss
 
-            if combined.shape[1] == 1:
-                to_optimize = combined
+            if combined_loss.shape[1] == 1:
+                to_optimize = combined_loss
             else:
-                to_optimize, idxs = torch.min(combined, dim=1)
+                to_optimize, _ = torch.min(combined_loss, dim=1)
+                # to_optimize, idxs = torch.min(combined_loss, dim=1)
 
-            if not self.opt.disable_automasking:
-                output_dict[f"identity_selection/{scale}"] = (idxs > identity_reprojection_loss.shape[1] - 1).float()
-
+            # if not self.opt.disable_automasking:
+            #     output_dict[f"identity_selection/{scale}"] = (idxs > identity_reprojection_loss.shape[1] - 1).float()
             final_reprojection_loss = to_optimize.mean()
             loss_dict[f"loss/reprojection_{scale}"] = final_reprojection_loss.item()
             loss += final_reprojection_loss
@@ -557,14 +529,21 @@ class TrainerWithSegm:
             loss_dict[f"loss/smoothness_{scale}"] = smooth_loss.item()
             loss += self.opt.disparity_smoothness * smooth_loss / (2**scale)
 
-            if n_inst_appear_frames > 0:
+            if n_inst_appear_frames == 0:
+                loss_dict[f"loss/rough_metric_{scale}"] = 0.0
+            else:
                 rough_metric_loss = self.compute_rough_metric_loss(
-                    batch_upscaled_depth, batch_n_insts, segms_flat, height_expects, height_vars, obj_pix_heights, fy, n_inst_appear_frames
+                    depth_repeat,
+                    segms_flat,
+                    obj_pix_heights,
+                    obj_height_expects,
+                    obj_height_vars,
+                    fy,
+                    n_inst_appear_frames,
                 )
                 loss_dict[f"loss/rough_metric_{scale}"] = rough_metric_loss.item()
-                loss += self.opt.rough_metric_scale_weight * rough_metric_loss / (2**scale)
-            else:
-                loss_dict[f"loss/rough_metric_{scale}"] = 0.0
+                rate = max(1 - self.epoch / self.opt.gradual_limit_epoch, 0) if self.opt.gradual_metric_scale_weight else 1.0
+                loss += self.opt.rough_metric_scale_weight * rate * rough_metric_loss
 
             total_loss += loss
             loss_dict[f"loss/{scale}"] = loss.item()
@@ -575,33 +554,46 @@ class TrainerWithSegm:
 
     def compute_rough_metric_loss(
         self,
-        batch_depth: torch.Tensor,
-        batch_n_insts: torch.Tensor,
+        depth_repeat: torch.Tensor,
         segms_flat: torch.Tensor,
-        height_expects: torch.Tensor,
-        height_vars: torch.Tensor,
         obj_pix_heights: torch.Tensor,
+        obj_height_expects: torch.Tensor,
+        obj_height_vars: torch.Tensor,
         fy: float,
         n_inst_appear_frames: int,
-    ) -> torch.Tensor | None:
-        depth_repeat = batch_depth.repeat_interleave(batch_n_insts, dim=0)  # [sum(batch_n_insts), h, w]
+    ) -> torch.Tensor:
         match self.opt.rough_metric_loss_func:
             case "gaussian_nll_loss":
                 obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
                 pred_heights = obj_pix_heights * obj_mean_depths / fy
-                loss = F.gaussian_nll_loss(input=height_expects, target=pred_heights, var=height_vars, reduction="mean")
+                loss = F.gaussian_nll_loss(input=obj_height_expects, target=pred_heights, var=obj_height_vars, reduction="mean")
             case "abs":
                 obj_mean_depths = (depth_repeat * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2)).clamp(min=1e-9)
                 pred_heights = obj_pix_heights * obj_mean_depths / fy
-                loss = torch.abs(height_expects - pred_heights).mean()
+                loss = torch.abs(obj_height_expects - pred_heights).mean()
             case "mean_after_abs":
-                # obj_pix_heights: [sum(batch_n_insts),]
-                # depth_repeat: [sum(batch_n_insts), h, w]
-                # height_expects: [sum(batch_n_insts),]
                 pred_heights = obj_pix_heights[:, None, None] * depth_repeat / fy  # [sum(batch_n_insts), h, w]
-                loss = (torch.abs((height_expects[:, None, None] - pred_heights) * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2))).mean()
+                loss = (
+                    torch.abs((obj_height_expects[:, None, None] - pred_heights) * segms_flat).sum(dim=(1, 2)) / segms_flat.sum(dim=(1, 2))
+                ).mean()
         assert not loss.isnan()
         return loss / n_inst_appear_frames
+
+    def make_flats(
+        self,
+        batch_segms: torch.Tensor,
+        batch_labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        _, _, h, w = batch_segms.shape
+        segms_flat = batch_segms.view(-1, h, w)
+        non_padded_channels = segms_flat.sum(dim=(1, 2)) > 0
+        segms_flat = segms_flat[non_padded_channels]  # exclude padded channels
+        labels_flat = batch_labels.view(-1)[non_padded_channels].long()
+
+        obj_pix_heights = masks_to_pix_heights(segms_flat)
+        obj_height_expects = self.height_priors[labels_flat, 0]
+        obj_height_vars = self.height_priors[labels_flat, 1]
+        return segms_flat, obj_pix_heights, obj_height_expects, obj_height_vars
 
     def compute_depth_losses(self, input_dict, output_dict, loss_dict):
         """Compute depth metrics, to allow monitoring during training
@@ -609,9 +601,8 @@ class TrainerWithSegm:
         This isn't particularly accurate as it averages over the entire batch,
         so is only used to give an indication of validation performance
         """
-        batch_depth_pred = output_dict[("depth", 0)]
+        batch_depth_pred = output_dict[("depth", 0)].detach()
         batch_depth_pred = torch.clamp(F.interpolate(batch_depth_pred, [375, 1242], mode="bilinear", align_corners=False), 1e-3, 80)
-        batch_depth_pred = batch_depth_pred.detach()
 
         batch_depth_gt = input_dict["depth_gt"]
         batch_mask = batch_depth_gt > 0
@@ -669,16 +660,7 @@ class TrainerWithSegm:
                             )
 
                     writer.add_image(f"disp_{scale}/{j}", normalize_image(output_dict[("disp", scale)][j]), self.step)
-
-                    if self.opt.predictive_mask:
-                        for f_idx, frame_id in enumerate(self.opt.adj_frame_idxs[1:]):
-                            writer.add_image(
-                                f"predictive_mask_{frame_id}_{scale}/{j}",
-                                output_dict["predictive_mask"][("disp", scale)][j, f_idx][None, ...],
-                                self.step,
-                            )
-
-                    elif not self.opt.disable_automasking:
+                    if not self.opt.disable_automasking:
                         writer.add_image(
                             f"automask_{scale}/{j}",
                             output_dict[f"identity_selection/{scale}"][j][None, ...],
@@ -728,7 +710,6 @@ class TrainerWithSegm:
                 # save the sizes - these are needed at prediction time
                 to_save["height"] = self.opt.height
                 to_save["width"] = self.opt.width
-                to_save["use_stereo"] = self.opt.use_stereo
             torch.save(to_save, save_path)
             if is_best:
                 torch.save(to_save, os.path.join(save_best_folder, f"{model_name}.pth"))
@@ -769,12 +750,3 @@ class TrainerWithSegm:
             self.model_optimizer.load_state_dict(optimizer_dict)
         else:
             print("Cannot find Adam weights so Adam is randomly initialized")
-
-        # # loading scheduler state
-        # scheduler_load_path = weights_dir.parent / "scheduler.pth"
-        # if scheduler_load_path.exists():
-        #     print("Loading learning rate scheduler weights")
-        #     scheduler_dict = torch.load(scheduler_load_path)
-        #     self.model_lr_scheduler.load_state_dict(scheduler_dict)
-        # else:
-        #     print(f"Cannot find scheduler weights so it is initialized with last_epoch={self.epoch - 1}")

@@ -23,6 +23,9 @@ class MonodepthOptions:
         self.parser.add_argument("--root_log_dir", type=str, help="log directory", default=os.path.join(file_dir, "new_logs"))
 
         # TRAINING options
+        self.parser.add_argument(
+            "--from_ground", action="store_true", help="when calculating scale factor, define silhouette height as from ground to the top"
+        )
         self.parser.add_argument("--with_normal_loss", action="store_true")
         self.parser.add_argument("--gradual_normal_weight", action="store_true")
         self.parser.add_argument(
@@ -80,7 +83,7 @@ class MonodepthOptions:
             "--segm_dirname",
             type=str,
             help="prefix of segm directory name like `{modified_segms_labels_person_car}",
-            default="modified_segms_labels_person_car",
+            default="modified_segms_labels_person_car_road_th400",
         )
         self.parser.add_argument("--resume", help="whether resuming training", action="store_true")
         self.parser.add_argument("--ckpt_timestamp", type=str, help="this arg is valid only when specifying --resume")
@@ -132,7 +135,7 @@ class MonodepthOptions:
         # OPTIMIZATION options
         self.parser.add_argument("--batch_size", type=int, help="batch size", default=12)
         self.parser.add_argument("--learning_rate", type=float, help="learning rate", default=1e-4)
-        self.parser.add_argument("--num_epochs", type=int, help="number of epochs (including epochs of suspended training)", default=25)
+        self.parser.add_argument("--num_epochs", type=int, help="number of epochs (including epochs of suspended training)", default=40)
         self.parser.add_argument("--scheduler_step_size", type=int, help="step size of the scheduler", default=15)
 
         # ABLATION options

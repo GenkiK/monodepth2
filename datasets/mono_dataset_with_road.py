@@ -224,6 +224,8 @@ class MonoDatasetWithRoad(data.Dataset):
             stereo_T[0, 3] = side_sign * baseline_sign * 0.1
 
             input_dict["stereo_T"] = torch.from_numpy(stereo_T)
+
+        # input_dict["filename"] = self.filenames[idx].rstrip()  # TODO: delete this line
         return input_dict
 
     def get_segms_labels_tensor(self, folder, frame_idx, side, do_flip):

@@ -1,3 +1,4 @@
+from .cityscapes_dataset import CityscapesDataset
 from .kitti_dataset import KITTIDepthDataset, KITTIOdomDataset, KITTIRAWDataset
 from .kitti_dataset_with_only_road import KITTIRAWDatasetWithOnlyRoad
 from .kitti_dataset_with_road import KITTIRAWDatasetWithRoad

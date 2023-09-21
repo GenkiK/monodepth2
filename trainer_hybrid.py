@@ -317,7 +317,6 @@ class TrainerHybrid:
             new_mean_cam_height_vars_dict = {
                 scale: sum_cam_height_var / self.n_inst_frames**2 for scale, sum_cam_height_var in self.sum_cam_height_vars_dict.items()
             }
-            # cond1 = not hasattr(self, "prev_mean_cam_height_expects_dict")
             cond1 = (self.opt.wo_1st_update and self.epoch > 0) or (not self.opt.wo_1st_update)
             cond2 = (
                 self.opt.sparse_update and (self.epoch - 1 if self.opt.wo_1st_update else self.epoch) % self.opt.update_freq == 0
