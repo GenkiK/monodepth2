@@ -11,16 +11,21 @@ from trainer_silhouette_base import TrainerSilhouetteBase
 from utils import (
     calc_obj_pix_height_over_dist_to_horizon,
     cam_pts2normal,
-    compute_scaled_sum_cam_height,
+    compute_scaled_cam_heights,
     sigmoid,
 )
 
 
-class TrainerSilhouette(TrainerSilhouetteBase):
+class TrainerSilhouetteMomentum(TrainerSilhouetteBase):
     def __init__(self, options):
+        if options.sparse_update:
+            raise ValueError("This class does not support --sparse_update")
+        if options.wo_1st_update:
+            raise ValueError("This class does not support --wo_1st_update")
+
         super().__init__(options)
-        self.scale_init_dict = {scale: 0.0 for scale in self.opt.scales}
-        self.sum_cam_height_dict = self.scale_init_dict.copy()
+        self.scale_init_dict = {scale: torch.full((len(self.train_loader.dataset),), torch.nan) for scale in self.opt.scales}
+        self.whole_cam_heights_dict: dict[int, torch.Tensor] = self.scale_init_dict.copy()
 
     def train(self):
         """Run the entire training pipeline"""
@@ -32,20 +37,26 @@ class TrainerSilhouette(TrainerSilhouetteBase):
         print(f"========= Training has started from {self.epoch} epoch. ========= ")
         for self.epoch in range(self.epoch, self.opt.num_epochs):
             self.n_inst_frames = 0
-            self.sum_cam_height_dict = self.scale_init_dict.copy()
+            self.whole_cam_heights_dict = self.scale_init_dict.copy()
+            self.cam_height_idx_last = 0
+
             self.train_epoch()
             val_loss_dict = self.val_epoch()
             val_loss = val_loss_dict[self.standard_metric]
-            new_cam_height_dict = {scale: sum_cam_height / self.n_inst_frames for scale, sum_cam_height in self.sum_cam_height_dict.items()}
-            cond1 = (self.opt.wo_1st_update and self.epoch > 0) or (not self.opt.wo_1st_update)
-            cond2 = (
-                self.opt.sparse_update and (self.epoch - 1 if self.opt.wo_1st_update else self.epoch) % self.opt.update_freq == 0
-            ) or not self.opt.sparse_update
-            if cond1 and cond2:
-                self.prev_cam_height_dict = new_cam_height_dict
-                if not self.opt.dry_run:
-                    self.log_cam_height()
+            new_cam_height_dict = {
+                scale: torch.nanquantile(whole_cam_heights, q=0.5) for scale, whole_cam_heights in self.whole_cam_heights_dict.items()
+            }
+
+            if self.epoch == 0:
+                # train_epoch()ではインスタンスがprev_cam_height_dictをattrとして持っているかで分岐する処理があるのでここで初期化
+                self.prev_cam_height_dict = {scale: 0.0 for scale in self.opt.scales}
+            epoch = self.epoch + 1
+            self.prev_cam_height_dict = {
+                scale: (prev_cam_height * (epoch - 1) * epoch / 2 + epoch * cam_height) / (epoch * (epoch + 1) / 2)
+                for (scale, prev_cam_height), cam_height in zip(self.prev_cam_height_dict.items(), new_cam_height_dict.values())
+            }
             if not self.opt.dry_run:
+                self.log_cam_height()
                 if (lower_is_better and val_loss < th_best) or (not lower_is_better and val_loss > th_best):
                     self.save_model(is_best=True)
                     th_best = val_loss
@@ -109,12 +120,14 @@ class TrainerSilhouette(TrainerSilhouetteBase):
                 batch_n_insts = torch.tensor([chunk.sum() for chunk in split_inlier_mask], device=self.device)
                 n_inst_appear_frames = (batch_n_insts > 0).sum()
 
+            # TODO: 道路が無いときはどの物体も信頼すべきではないので取り除くべきでは？現状道路がない＝物体もない環境がほとんどなので大差はなさそう
+
         if mode == "train":
             self.n_inst_frames += (batch_n_insts[batch_road_appear_bools] > 0).sum()
 
         fy: float = input_dict[("K", source_scale)][0, 1, 1]
         batch_target: torch.Tensor = input_dict[("color", 0, source_scale)]
-        for scale in self.opt.scales:
+        for scale_idx, scale in enumerate(self.opt.scales):
             loss = 0.0
             reprojection_losses = []
             batch_disp: torch.Tensor = output_dict[("disp", scale)]
@@ -209,7 +222,7 @@ class TrainerSilhouette(TrainerSilhouetteBase):
 
                 if batch_road_wo_no_road.shape[0] > 0:
                     flat_road_appear_idxs = batch_road_appear_bools.repeat_interleave(batch_n_insts, dim=0)
-                    scaled_sum_cam_height = compute_scaled_sum_cam_height(
+                    scaled_cam_heights = compute_scaled_cam_heights(
                         segms_flat[flat_road_appear_idxs],
                         batch_n_insts[batch_road_appear_bools],
                         road_normal_neg_wo_no_road,
@@ -218,9 +231,11 @@ class TrainerSilhouette(TrainerSilhouetteBase):
                         obj_height_expects[flat_road_appear_idxs],
                         from_ground=self.opt.from_ground,
                     )
-
                     if mode == "train":
-                        self.sum_cam_height_dict[scale] += scaled_sum_cam_height
+                        new_idx_last = self.cam_height_idx_last + scaled_cam_heights.shape[0]
+                        self.whole_cam_heights_dict[scale][self.cam_height_idx_last : new_idx_last] = scaled_cam_heights
+                        if scale_idx == len(self.opt.scales) - 1:
+                            self.cam_height_idx_last = new_idx_last
 
             total_loss += loss
             loss_dict[f"loss/{scale}"] = loss.item()

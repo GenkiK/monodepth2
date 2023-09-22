@@ -10,9 +10,9 @@ echo ""
 # disable automasking
 # CUDA_VISIBLE_DEVICES=2 python -OO $ROOT_DIR/train_with_segm.py --model_name person_car_annot_height_disable_mask_rough01 --height 320 --width 1024 --segm_dirname modified_segms_labels_person_car --rough_metric_scale_weight 0.1 --annot_height --disable_automasking
 
-# abs
-# CUDA_VISIBLE_DEVICES=2 python -OO $ROOT_DIR/train_with_segm.py --model_name person_car_annot_height_abs_rough01 --height 320 --width 1024 --segm_dirname modified_segms_labels_person_car --rough_metric_scale_weight 0.1 --annot_height --rough_metric_loss_func "abs"
+# # abs
+# CUDA_VISIBLE_DEVICES=3 python -OO $ROOT_DIR/train_with_segm.py --model_name person_car_annot_height_abs_rough005 --height 320 --width 1024 --segm_dirname modified_segms_labels_person_car --rough_metric_scale_weight 0.05 --annot_height --rough_metric_loss_func "abs"
 
 # mean_after_abs
-CUDA_VISIBLE_DEVICES=2 python -OO $ROOT_DIR/train_with_segm.py --model_name person_car_annot_height_mean_after_abs_rough01 --height 320 --width 1024 --segm_dirname modified_segms_labels_person_car --rough_metric_scale_weight 0.1 --annot_height --rough_metric_loss_func "mean_after_abs"
+CUDA_VISIBLE_DEVICES=3 python -OO $ROOT_DIR/train_with_segm.py --model_name person_car_annot_height_mean_after_abs_rough005 --height 320 --width 1024 --segm_dirname modified_segms_labels_person_car --rough_metric_scale_weight 0.05 --annot_height --rough_metric_loss_func "mean_after_abs"
 

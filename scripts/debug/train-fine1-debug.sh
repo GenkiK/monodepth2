@@ -9,7 +9,7 @@ echo ""
 
 
 # train w/o outlier segms
-CUDA_VISIBLE_DEVICES=0 python -OO $ROOT_DIR/train_with_road_debug.py --model_name "person_car_annot_height_abs_fine05" --height 320 --width 1024 --segm_dirname modified_segms_labels_person_car_road --fine_metric_scale_weight 0.5 --annot_height --resume --ckpt_timestamp $CKPT_TIMESTAMP --last_epoch_for_resume $LAST_EPOCH --batch_size 2 --local --cam_height_loss_func "abs"
+CUDA_VISIBLE_DEVICES=0 python -OO $ROOT_DIR/train_with_road_debug.py --model_name "person_car_annot_height_abs_fine05" --height 320 --width 1024 --segm_dirname modified_segms_labels_person_car_road --fine_metric_scale_weight 0.5 --annot_height --batch_size 2 --local --cam_height_loss_func "abs"
 
 # # Our low resolution mono model
 # python ../train.py --model_name M_416x128 \

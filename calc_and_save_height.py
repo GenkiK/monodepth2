@@ -25,7 +25,6 @@ def erode(segms: np.ndarray, kernel) -> tuple[np.ndarray, np.ndarray]:
     return eroded_segms[valid_idxs], valid_idxs
 
 
-# unused
 # def exclude_small_segm(segms: np.ndarray, labels: np.ndarray, th: int) -> tuple[np.ndarray, np.ndarray]:
 #     areas = segms.sum(axis=(1, 2))
 #     sorted_idxs = np.argsort(-areas)
@@ -49,10 +48,11 @@ def depth2cam_pts(depth: np.ndarray, cam_grid: np.ndarray) -> np.ndarray:
 def cam_pts2cam_height(cam_pts: np.ndarray, road_mask: np.ndarray) -> np.ndarray:
     # cam_pts: [h,w,3]
     A = cam_pts[road_mask == 1]  # [?, 3]
-    ones = -np.ones((A.shape[0], 1), dtype=np.float64)
-    normal = np.linalg.pinv(A) @ ones  # [3, 1]
+    b = -np.ones((A.shape[0], 1), dtype=np.float64)
+    A_T = A.T
+    normal = np.linalg.pinv(A_T @ A) @ A_T @ b  # [3, 1]
     normal /= np.linalg.norm(normal)
-    cam_height = (A @ normal).mean()
+    cam_height = np.abs(A @ normal).mean()
     return cam_height
 
 
@@ -139,7 +139,6 @@ if __name__ == "__main__":
                     else:
                         disp_dir = Path(data_dir_tpl.format("disp"))
 
-                    basis_normal = None
                     road_paths = sorted(road_dir.glob("*npy"))
                     if args.manydepth:
                         road_paths = road_paths[1:]

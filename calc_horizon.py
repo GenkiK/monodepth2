@@ -90,7 +90,6 @@ if __name__ == "__main__":
     h, w = args.img_height, args.img_width
 
     camera_numbers = ("2",)
-    # camera_numbers = ("2", "3") # FIXME: uncomment this line
     K = np.array([[0.58, 0, 0.5], [0, 1.92, 0.5], [0, 0, 1]], dtype=np.float32)
     K[0, :] *= w
     K[1, :] *= h
@@ -126,8 +125,12 @@ if __name__ == "__main__":
                     hp2 = data["horizon_p2"]
 
                     road_mask = np.load(road_path).astype(np.uint8)
-                    road_mask_cut = road_mask.copy()
-                    road_mask_cut[: 2 * h // 3, :] = 0
+                    mask = np.zeros((h, w), dtype=road_mask.dtype)
+                    # mask[int(0.875 * h) :, int(0.425 * w) : int(0.575 * w)] = 1
+                    # mask[2 * h // 3 :, :] = 1
+                    mask[:, :] = 1
+                    road_mask_cut = mask * road_mask
+                    # road_mask_cut[int(0.875 * h) :, int(0.425 * w) : int(0.575 * w)] = 0
                     if road_mask.sum() == 0:
                         continue
 

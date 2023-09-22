@@ -13,8 +13,8 @@ import numpy as np
 import torch
 import torch.utils.data as data
 from PIL import Image  # using pillow-simd for increased speed
-from torchvision import transforms
-from torchvision.transforms import functional as F
+from torchvision.transforms import v2
+from torchvision.transforms.v2 import functional as F
 
 
 def load_pil(path):
@@ -93,7 +93,7 @@ class MonoDatasetWithRoad(data.Dataset):
 
         self.pil_loader = load_pil
         self.tensor_segms_labels_loader = load_segms_labels_as_tensor
-        self.to_tensor = transforms.ToTensor()
+        self.to_tensor = v2.Compose([v2.ToImageTensor(), v2.ConvertDtype(torch.float32)])
 
         # We need to specify augmentations differently in newer versions of torchvision.
         # We first try the newer tuple version; if this fails we fall back to scalars
@@ -102,18 +102,18 @@ class MonoDatasetWithRoad(data.Dataset):
             self.contrast = (0.8, 1.2)
             self.saturation = (0.8, 1.2)
             self.hue = (-0.1, 0.1)
-            transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
+            v2.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
         except TypeError:
             self.brightness = 0.2
             self.contrast = 0.2
             self.saturation = 0.2
             self.hue = 0.1
 
-        img_interp = transforms.InterpolationMode.LANCZOS
+        img_interp = v2.InterpolationMode.LANCZOS
         self.resize_func_dict = {}
         for i in range(self.num_scales):
             s = 2**i
-            self.resize_func_dict[i] = transforms.Resize((self.height // s, self.width // s), interpolation=img_interp)
+            self.resize_func_dict[i] = v2.Resize((self.height // s, self.width // s), interpolation=img_interp)
         self.load_depth = self.check_depth()
 
     def preprocess(self, input_dict, color_aug):
@@ -191,7 +191,7 @@ class MonoDatasetWithRoad(data.Dataset):
         input_dict["labels"] = labels
 
         if do_color_aug:
-            aug_params = transforms.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
+            aug_params = v2.ColorJitter.get_params(self.brightness, self.contrast, self.saturation, self.hue)
             color_aug = partial(color_aug_func, aug_params=aug_params)
         else:
             color_aug = lambda x: x

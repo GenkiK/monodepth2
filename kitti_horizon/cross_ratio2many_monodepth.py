@@ -6,13 +6,12 @@ from pathlib import Path
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 from PIL import Image
 from sklearn import linear_model
 from tqdm import tqdm
 
 
-def load_segms_and_labels(path: Path) -> tuple[torch.Tensor, np.ndarray]:
+def load_segms_and_labels(path: Path) -> tuple[np.ndarray, np.ndarray]:
     npz = np.load(path)
     segms = npz["segms"].astype(np.uint8)
     labels = npz["labels"].astype(np.uint8)
@@ -35,7 +34,7 @@ cmap = plt.get_cmap("Set3")
 LARGE_VALUE = np.iinfo(np.uint16).max
 
 
-def make_rects(boxes: torch.Tensor) -> tuple[torch.Tensor, list[patches.Rectangle]]:
+def make_rects(boxes: np.ndarray) -> list[patches.Rectangle]:
     rects = []
     for idx, box in enumerate(boxes):
         # color = [int(255 * c) for c in cmap(idx)[:3]]

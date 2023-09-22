@@ -3158,77 +3158,39 @@ objective1,2が終わってから取り組む
 
 
 -----------------------------------------------------------------------------------------
-# 09-11
+# 09-19
 -----------------------------------------------------------------------------------------
-
-[<<prev](https://github.com/kyotovision/kinoshita_genki/issues/22) &nbsp; [next>>](https://github.com/kyotovision/kinoshita_genki/issues/24)
-
-### [骨子](https://github.com/kyotovision/kinoshita_genki/issues/24)
-
 ### 前回の総括
-- 骨子を書いた
+- スケルトンを書いた
 
 ### 今週やることの概要
-- あまり本質的ではないが，今までOneFormerという絶妙に新しくなくて人気もないセグメンテーションモデルを使ってたので，より精度も良くて人気もあって使いやすい[InterImage](https://github.com/OpenGVLab/InternImage)で代用する．
-    - SAMも試してみたが，例えば"car"と入力しても画像中の2割くらいの物体しかDetectionしてくれなかったのでやめた．SAM-HQも似た結果．
-- 高さ推定器の学習に，ズームアウト・オクルージョン領域の増加 のAugmentationを加えて再学習
-- メインモデルに対して，より改善できそうな点を探る
-- 推定した道路平面上に存在しない物体の除去法の考案
+- [ ] 高さ推定器の学習に，ズームアウト・オクルージョン領域の増加 のAugmentationを加えて再学習
+- [ ] 高さ推定器の精度をKITTI 3Dで評価
+- 学習の安定化
+    - [ ] カメラ高さをエポックごとに更新するように変更（今までは２エポックおきに更新）＆前エポックで計算したカメラ高さとの移動平均を取る
+    - [ ] シルエットを使ってスケールファクタを計算すると，カメラ高さが大きくなりすぎてしまう原因を探る
+    - [ ] camera height lossとrough geometric lossのバランスする係数を変えてみる
 
-# O-1: 研究のゴールを考える
+# O-1: 高さ推定器が高さの事前情報の固定値よりもKITTI 3D BBoxの高さ推定精度を上回ることを実証
 
-## KR-1a: 最新のmetric depthを出力するモデルの論文を読む
-
-### [Metric3D](https://github.com/YvanYin/Metric3D) (ICCV2023)
-<img src="https://github.com/kyotovision/kinoshita_genki/assets/54442538/db3c0f70-bcd9-4954-90f7-21496bba7161" width=90%>
-
-#### 概要
-- 800万枚という桁違いのデータセットで深度を教師あり学習．Indoor, outdoor両方のドメインでzero-shot転移可能．精度も非常に良い．
-
-- 内部パラメータによる深度の曖昧性を回避するため，任意の入力を共通の内部パラメータになるように調整し，その空間で深度を推定．その後内部パラメータが元に戻るよう再調整したものを出力とする．
-
-#### 思ったこと
-- 恐らくモデルは**物体のおおよその大きさを理解して**推定している．なのでモデルの中間表現を使えば3D Object Detectionなどの別タスクに応用できそう
-    - **CLIPと合わせれば学習時に存在しないクラスも3D Object Detectionできそう**
-
-<details><summary>その他</summary>
-
-### [ZeroDepth](https://arxiv.org/abs/2306.17253) (ICCV2023)
-<img src="https://github.com/kyotovision/kinoshita_genki/assets/54442538/8f07e768-cda7-4299-8650-1a1ca3d18c74" width=90%>
-
-#### 概要
-- 300万枚のデータセットでDepth推定器を教師あり学習．Indoor, outdoor両方のドメインでzero-shot転移可能．学習枚数の違いのせいか，Metric3Dよりかは精度が低い
-- 内部パラメータを元にembeddingを獲得し，内部パラメータによる深度の曖昧性を回避．
-
-#### 思ったこと
-- アーキテクチャはけっこうこだわって作ってるが，ViT + UNetのMetric3Dに負けているのが残念．結局学習枚数とパラメータ数が大事．
-
-### [ZoeDepth](https://github.com/isl-org/ZoeDepth) (arxiv preprint)
-Midasを教師データ使って実スケールにする論文．まだ読めてない．
-
-## _KR-1b: Depth推定周りの最新の論文を読む_
-
-### [SfM-TTR](https://openaccess.thecvf.com/content/CVPR2023/papers/Izquierdo_SfM-TTR_Using_Structure_From_Motion_for_Test-Time_Refinement_of_Single-View_CVPR_2023_paper.pdf) (CVPR2023)
-- self-supervisedに学習したMonodepthを，推論時にCOLMAP or visual SLAMを使ってtest-time refineする手法．
-- 本当にCOLMAPを組み合わせただけなのでCVPR2023に通っているのに驚き．
-
-### [Robust Depth](https://kieran514.github.io/Robust-Depth-Project/) (ICCV2023)
-- 単一のモデルで様々なドメインギャップに対応するよう自己教師のみで学習する方法を提案
-- 学習時は，オリジナル画像とそれにFog等の加工を加えた画像を用意．加工画像を入力して推定したDepthからreconstruction lossを計算する際，加工画像ではなくオリジナル画像を使用．
-
-### [SlowTV](https://github.com/jspenmar/slowtv_monodepth) (ICCV2023)
-- 200万枚近くのデータセットで**自己教師あり学習**し，zero-shot転移可能にしたモデル．ただDPTやMiDASにしっかり負けている．
-- 自己教師あり学習するためのデータセットとしてSlowTVというyoutubeチャンネルからダウンロードした動画を提案．森林や水中といった自然環境などを様々なジャンルの動画が含まれている．
-</details>
+## _KR-1: 高さ推定器の訓練にAugmentationを追加して訓練・KITTIで評価_
+ズームアウト・オクルージョン領域増加のAugmentationを加えて再学習
 
 
-## _KR-2b: 異常物体の排除手法を確立する_
+# O-2: Training frameworkの学習安定化のための改善実験・考察
+
+## _KR-2a: カメラ高さの更新を移動平均（モーメンタム）に変える_
+
+## _KR-2b: 結局カメラ高さは何エポックおきに更新するのが良いのか実験_
+現在は安定化のために2エポックおきに更新している（update->stay->stay->update)．更新時にモーメンタムを計算するなら
+
+## _KR-2c: 異常物体の排除手法を確立する_
 
 異常物体の定義： 「道路平面に接地してない・クラス分類誤り・セグメント領域誤り」
 
-### 経過
-
 現状の手法は以下の通り．イメージ的には **「道路平面に存在していると仮定した物体が，画像上のこの位置にこの大きさで存在しているのは自然かどうか」**
+
+<details><summary>手続き</summary>
 
 1. 推定した深度マップの道路領域からhorizonを計算
 
@@ -3236,8 +3198,11 @@ Midasを教師データ使って実スケールにする論文．まだ読めて
    - [Single View Scene Scale Estimation using Scale Field](https://openaccess.thecvf.com/content/CVPR2023/papers/Lee_Single_View_Scene_Scale_Estimation_Using_Scale_Field_CVPR_2023_paper.pdf)(CVPR2023) のEq.2 (「**画像平面上での物体下端からhorizonまでの距離と物体のピクセル高さの比は，カメラ高さと物体の実高さの比と近似できる**」を主張）
 
 3. 異常とみなした物体については，カメラ高さの計算時・粗い幾何制約式の損失計算時に利用しない
+</details>
 
 上記の方法だと，物体上部だけ見えているが道路平面に接地している物体を取り除いてしまうというデメリットがある．これらの物体は本来スケールの決定に用いることができるので取り除くべきではない．
+
+**※一旦塩漬け**
 
 とりあえずは以下の方法を試してみる．同時にもっと良い方法がないかを考え続ける．
 
@@ -3247,34 +3212,11 @@ Midasを教師データ使って実スケールにする論文．まだ読めて
 デメリットとしては，前エポックに計算したカメラ高さに依存しており，この値に最適化されてしまう可能性が高い．
 
 
+# O-3: 他の先行研究とresolutionを揃えて精度で勝つ
 
-## _KR-2c: 物体高さの事前知識としてKITTIの3D BBoxの高さの平均値を使用しないような手法に修正_
-
-高さの分布はデータセット間において差分はそれほどないが「この平均値が少し変わるだけで推定結果も全体的にズレる」というのはかなり欠点．またKITTIとCityscapesは他のデータセットに比べて車の高さ分布の平均値が小さい（[MonoCInIS](https://openaccess.thecvf.com/content/ICCV2021W/3DODI/papers/Heylen_MonoCInIS_Camera_Independent_Monocular_3D_Object_Detection_Using_Instance_Segmentation_ICCVW_2021_paper.pdf)(ICCV2021W)によるとKITTIとCityscapesは3D BBoxがtightでWaymoとかは緩い）という特徴があるので，他のデータセットと合わせて平均値を計算しようとすると確実に精度が変わってしまう．
-
-### 経過
-車のマスク画像と車種（高さ情報あり）のデータセットである[DVM-CAR](https://deepvisualmarketing.github.io/)データセットを用いて車のマスク画像から高さを推定するネットワークを学習させた（8/28）．データセットには以下の問題があるため，将来的には「使用する車種データセットを変更し高さ情報をアノテート or 画像データをクロールして車種データセットを作る」までやりたい．
-
-<details><summary>DVM-CARデータセットの問題点</summary>
-
- - 899種類とそんなに多くない
- - マスク精度が結構悪い
- - 車内画像が含まれてたりする
-- アノテートされた高さが明らかに間違っているものがある
-</details>
-
-
-バックボーンにImageNetでpretrainしたConvNeXt(base)，ヘッドにMLP2層を採用．
-
-現状ではColorJitterでのみAugmentationしているが，車載動画の視点で得られる車のマスク画像にドメインを近づけるために，
-
-- ズームアウト
-- 画像の一部を隠してオクルージョンを増やす
-
-といったAugmentationも加えていく．
-
-### メモ
-[X-Distill](https://www.bmvc2021-virtualconference.com/conference/papers/paper_0510.html)(BMVC2021)のように，高さ推定器の推定結果をpseudo labelとして，Depth推定器から生やした高さを推定するブランチを教師あり学習すると，物体の高さを理解した上で深度の推定を行うことが可能になるかも．
+今まではMonodepth2に則って1024x320の解像度で実験していたが，比較手法が割と640x192で行っていたので，そちらに合わせて実験する．
+## _KR-3: とりあえず640x192の解像度で学習・評価_
+...
 
 
 # メモ
@@ -3290,18 +3232,18 @@ Midasを教師データ使って実スケールにする論文．まだ読めて
             - 学習済みMonodepth2が出力する深度マップでは，物体形状があまり正確ではないのでここからGTを作って学習するのは微妙？
             - マスクのみから深度を生成するできるのか...？ マスク形状から姿勢方向はわかりそうだが，appearanceがないと見切れ物体がどのくらい見切れているかを判断するのが難しい．
         - マスクをどんどん大きくしていくことを考えるとdiffusionも使えそう
+- [X-Distill](https://www.bmvc2021-virtualconference.com/conference/papers/paper_0510.html)(BMVC2021)のように，高さ推定器の推定結果をpseudo labelとして，Depth推定器から生やした高さを推定するブランチを教師あり学習すると，物体の高さを理解した上で深度の推定を行うことが可能になるかも．
 
-## _KR-1b: 道路平面の傾きを理解した推定が可能になるように，損失を加える or Data Augmentation手法を考える_
+# 後回し
 
 <details><summary>後回し</summary>
+
+## _KR-2d: 道路平面の傾きを理解した推定が可能になるように，損失を加える or Data Augmentation手法を考える_
+
 
 学習済みのオリジナルのmonodepth2が出力する深度マップから道路領域の法線ベクトルを計算し，そこから計算したhorizonとGTのhorizonを見比べると，特にGTの傾きが大きい時に差が大きくなる．つまりmonodepth2は**道路領域の法線ベクトルはほぼy軸方向であると推定しがち**．
     <img src="https://github.com/kyotovision/kinoshita_genki/assets/54442538/cb2c1749-a09b-4251-b6d8-b88f14bc285e" width=40%>
     これが原因となり，計算するカメラ高さの値が不正確になっている？
-</details>
-
-
-<details><summary>後回しでやること</summary>
 
 # O-3: 学習の高速化
 

@@ -168,7 +168,7 @@ class MonodepthOptions:
 
         # SYSTEM options
         self.parser.add_argument("--no_cuda", help="if set disables CUDA", action="store_true")
-        self.parser.add_argument("--num_workers", type=int, help="number of dataloader workers", default=4)
+        self.parser.add_argument("--num_workers", type=int, help="number of dataloader workers", default=6)
 
         # LOADING options
         # self.parser.add_argument("--load_weights_folder", type=str, help="name of model to load")

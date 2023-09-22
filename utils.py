@@ -118,6 +118,55 @@ def compute_scaled_sum_cam_height(
     return scaled_sum_cam_height
 
 
+def compute_scaled_cam_heights(
+    segms_flat: torch.Tensor,
+    batch_n_inst: torch.Tensor,
+    batch_road_normal_neg: torch.Tensor,
+    batch_cam_pts: torch.Tensor,
+    batch_unscaled_cam_height: torch.Tensor,
+    obj_height_expects: torch.Tensor,
+    from_ground: bool = False,
+) -> torch.Tensor:
+    """
+    segms_flat: [n_inst, h, w], cuda
+    batch_road_normal_neg: [bs, 3], cuda
+    batch_cam_pts: [bs, h, w, 3], cuda
+    batch_unscaled_cam_height: [bs,], cuda
+    """
+    device = segms_flat.device
+    bs = batch_cam_pts.shape[0]
+    nx, ny, _ = batch_road_normal_neg.T
+    batch_origin = torch.stack((torch.zeros(bs, device=device), batch_unscaled_cam_height / ny, torch.zeros(bs, device=device)), dim=1)  # [bs, 3]
+    batch_root = torch.sqrt(ny**2 / (nx**2 + ny**2))
+    batch_x_basis = torch.stack((batch_root, -ny / ny * batch_root, torch.zeros(bs, device=device)), dim=1)  # [bs, 3]
+    batch_z_basis = torch.cross(batch_x_basis, batch_road_normal_neg)  # [bs, 3]
+    projected_cam_pts = batch_cam_pts - batch_z_basis[:, None, None, :] * torch.einsum("bijk,bk->bij", batch_cam_pts, batch_z_basis).unsqueeze(-1)
+    projected_cam_pts -= batch_origin[:, None, None, :]  # [bs, h, w, 3]
+    batch_ys = torch.einsum("bijk,bk->bij", projected_cam_pts, batch_road_normal_neg)  # [bs, h, w]
+
+    projected_height_flat = torch.zeros((segms_flat.shape[0],), device=device)
+    prev_n_inst = 0
+    if from_ground:
+        for batch_idx, n_inst in enumerate(batch_n_inst):
+            for idx in range(prev_n_inst, prev_n_inst + n_inst):
+                region = batch_ys[batch_idx, segms_flat[idx]]
+                if (segm_max := region.max()) < 0:
+                    projected_height_flat[idx] = -region.min()
+                else:
+                    projected_height_flat[idx] = segm_max - region.min()
+            prev_n_inst += n_inst
+    else:
+        for batch_idx, n_inst in enumerate(batch_n_inst):
+            for idx in range(prev_n_inst, prev_n_inst + n_inst):
+                region = batch_ys[batch_idx, segms_flat[idx]]
+                projected_height_flat[idx] = region.max() - region.min()
+            prev_n_inst += n_inst
+    split_scales = torch.split(obj_height_expects / projected_height_flat, batch_n_inst.tolist())
+    frame_scales = torch.tensor([chunk.quantile(0.5) if chunk.numel() > 0 else torch.nan for chunk in split_scales], device=device)
+    frame_scaled_cam_heights = frame_scales * batch_unscaled_cam_height
+    return frame_scaled_cam_heights[~frame_scaled_cam_heights.isnan()]
+
+
 def calc_occluded_obj_pix_height(
     homo_pix_grid: torch.Tensor,
     batch_segms: torch.Tensor,
